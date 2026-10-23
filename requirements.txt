@@ -2,6 +2,7 @@ pywin32==308
 psutil~=6.1.1
 yara-python
 pymem==1.14.0
+pefile~=2024.8.26
 zstandard~=0.23.0
 pillow==11.0.0
 google==3.0.0

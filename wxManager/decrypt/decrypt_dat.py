@@ -10,6 +10,7 @@
 """
 import os
 import struct
+import threading
 from typing import List, Tuple
 from concurrent.futures import ProcessPoolExecutor
 from aiofiles import open as aio_open
@@ -30,6 +31,192 @@ AES_KEY_MAP = {
     b'\x07\x08V1\x08\x07': b'cfcd208495d565ef',  # 4.0第一代图片密钥
     b'\x07\x08V2\x08\x07': b'43e7d25eb1b9bb64',  # 4.0第二代图片密钥，微信4.0.3正式版使用
 }
+
+V2_MAGIC = b'\x07\x08V2\x08\x07'
+PLAIN_IMAGE_MAGICS = (b'\xff\xd8\xff', b'\x89PNG', b'GIF8', b'BM', b'RIFF')
+
+# --------------------------------------------------------------- V2 (微信4.1) 图片解密
+_v2_key_cache = []      # [(aes_key_bytes, xor_key_int), ...]
+_v2_resolved = None     # 验证命中的 (aes_key, xor_key)
+_voip_dll = None
+_voip_lock = threading.Lock()
+_V2_CACHE_FILE = os.path.join(os.environ.get('TEMP', os.environ.get('TMP', '/tmp')),
+                              'memotrace_v2_keys.json')
+
+
+def clean_wxid(wxid: str) -> str:
+    """去掉账号后缀：wxid_xxx_96c0 -> wxid_xxx"""
+    parts = wxid.split('_')
+    return '_'.join(parts[:2]) if wxid.startswith('wxid_') and len(parts) >= 3 else wxid
+
+
+def find_v2_codes():
+    """从 MMKV statistic 文件名提取 code 列表（离线，无需微信在线）"""
+    import glob
+    import re
+    appdata = os.environ.get('APPDATA', '')
+    patterns = [
+        os.path.join(appdata, r'Tencent\xwechat\net\kvcomm\key_*.statistic'),
+        os.path.join(appdata, r'Tencent\xwechat\net\ilink\kvcomm\key_*.statistic'),
+        os.path.join(appdata, r'Tencent\WeChat\*\kvcomm\key_*.statistic'),
+    ]
+    codes = []
+    for pat in patterns:
+        for f in glob.glob(pat):
+            m = re.search(r'key_(\d+)_', os.path.basename(f))
+            if m and int(m.group(1)) not in codes:
+                codes.append(int(m.group(1)))
+    return codes
+
+
+def get_v2_keys():
+    """返回候选 [(aes_key, xor_key)]，来自 MMKV 派生 + xor_key 交叉验证。
+    派生结果持久化到磁盘，供多进程子进程（如批量图片导出）使用。"""
+    global _v2_key_cache
+    if _v2_key_cache:
+        return _v2_key_cache
+    # 先读磁盘缓存（多进程子进程走这里）
+    try:
+        import json
+        if os.path.isfile(_V2_CACHE_FILE):
+            with open(_V2_CACHE_FILE, encoding='utf-8') as f:
+                data = json.load(f)
+            _v2_key_cache = [(k.encode(), x) for k, x in data['keys']]
+            return _v2_key_cache
+    except Exception:
+        pass
+    import hashlib
+    wxid = ''
+    try:
+        from wxManager.model import Me
+        wxid = clean_wxid(Me().wxid or '')
+    except Exception:
+        pass
+    if not wxid:
+        return []
+    for code in find_v2_codes():
+        aes_key = hashlib.md5(f'{code}{wxid}'.encode()).hexdigest()[:16].encode()
+        _v2_key_cache.append((aes_key, code & 0xFF))
+    # 写磁盘缓存
+    try:
+        import json
+        with open(_V2_CACHE_FILE, 'w', encoding='utf-8') as f:
+            json.dump({'wxid': wxid, 'keys': [[k.decode(), x] for k, x in _v2_key_cache]}, f)
+    except Exception:
+        pass
+    return _v2_key_cache
+
+
+def _sniff_image(data: bytes) -> str:
+    if data.startswith(b'\xff\xd8\xff'): return 'jpg'
+    if data.startswith(b'\x89PNG\r\n\x1a\n'): return 'png'
+    if data.startswith(b'GIF87a') or data.startswith(b'GIF89a'): return 'gif'
+    if data.startswith(b'BM'): return 'bmp'
+    if data.startswith(b'RIFF'): return 'webp'
+    return ''
+
+
+def _find_voip_dll() -> str:
+    """定位微信安装目录下的 VoipEngine.dll（wxgf 转码用）"""
+    global _voip_dll
+    if _voip_dll:
+        return _voip_dll
+    roots = []
+    try:
+        import psutil
+        for p in psutil.process_iter(['name', 'exe']):
+            if p.info['name'] == 'Weixin.exe' and p.info['exe']:
+                roots.append(os.path.dirname(p.info['exe']))
+    except Exception:
+        pass
+    roots += [r'C:\Program Files\Tencent\Weixin', r'C:\Program Files (x86)\Tencent\Weixin',
+              r'D:\programFiles\Weixin', r'D:\Program Files\Tencent\Weixin']
+    cands = []
+    for root in roots:
+        if os.path.isdir(root):
+            for v in os.listdir(root):
+                p = os.path.join(root, v, 'VoipEngine.dll')
+                if os.path.isfile(p):
+                    cands.append(p)
+    if cands:
+        cands.sort(reverse=True)  # 版本号倒序取最新
+        _voip_dll = cands[0]
+    return _voip_dll
+
+
+def convert_wxgf(data: bytes) -> bytes | None:
+    """调用微信自带 VoipEngine.dll 将 wxgf 转码为 JPEG（单例 + 加锁）"""
+    import ctypes
+    dll_path = _find_voip_dll()
+    if not dll_path:
+        return None
+    with _voip_lock:
+        try:
+            os.add_dll_directory(os.path.dirname(dll_path))
+            voip = ctypes.WinDLL(dll_path)
+            fn = voip.wxam_dec_wxam2pic_5
+            arg5_t = bytes.fromhex(
+                '00 00 00 00 00 00 00 00 00 00 00 00 AA AA AA AA'
+                '00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00')
+            arg5 = (ctypes.c_ubyte * len(arg5_t)).from_buffer_copy(arg5_t)
+            raw_array = (ctypes.c_ubyte * len(data)).from_buffer_copy(data)
+            plain_array = (ctypes.c_ubyte * (16 << 20))()
+            plain_size = ctypes.c_uint32(16 << 20)
+            ret = fn(raw_array, ctypes.c_uint32(len(data)), plain_array,
+                     ctypes.byref(plain_size), arg5)
+            if ret == 0 and plain_size.value > 0:
+                return bytes(plain_array[:plain_size.value])
+        except Exception:
+            return None
+    return None
+
+
+def decode_dat_v41(data: bytes, xor_key: int) -> bytes | None:
+    """微信 4.1 V2 格式 dat 解密：AES-ECB 头部 + 16字节分隔尾 + XOR 尾部"""
+    global _v2_resolved
+    if not data.startswith(V2_MAGIC) or len(data) < 47:
+        return None
+    aes_size = struct.unpack('<I', data[6:10])[0]
+    xor_size = struct.unpack('<I', data[10:14])[0]
+    if aes_size <= 0 or len(data) < 15 + aes_size + 16:
+        return None
+    first_block = data[15:31]
+    cands = []
+    if _v2_resolved:
+        cands.append(_v2_resolved)
+    for k in get_v2_keys():
+        if k not in cands:
+            cands.append(k)
+    # 没有派生 key 时，也允许外部 xor_key 对应的尝试（V1 固定 key 兜底）
+    for name, fixed in (('V1', b'cfcd208495d565ef'), ('V2', b'43e7d25eb1b9bb64')):
+        if (fixed, xor_key) not in cands:
+            cands.append((fixed, xor_key))
+    cipher = None
+    for aes_key, xk in cands:
+        try:
+            pt = AES.new(aes_key, AES.MODE_ECB).decrypt(first_block)
+        except Exception:
+            continue
+        if _sniff_image(pt) or pt.startswith(b'wxgf'):
+            _v2_resolved = (aes_key, xk)
+            cipher = AES.new(aes_key, AES.MODE_ECB)
+            xor = xk
+            break
+    if cipher is None:
+        return None
+    head = cipher.decrypt(data[15:15 + aes_size])
+    pad = head[-1]
+    if 1 <= pad <= 16 and head[-pad:] == bytes([pad]) * pad:
+        head = head[:-pad]
+    tail = bytes(b ^ xor for b in data[15 + aes_size + 16: 15 + aes_size + 16 + xor_size])
+    out = head + tail
+    if out.startswith(b'wxgf'):
+        converted = convert_wxgf(out)
+        if converted:
+            out = converted
+        else:
+            return None  # wxgf 转码失败，宁缺毋滥
+    return out
 
 
 def get_aes_key(header):
@@ -192,57 +379,95 @@ def get_image_type(data: bytes) -> str:
 
 def decode_dat_v4(xor_key: int, file_path, out_path, dst_name='') -> str | bytes:
     """
-    适用于微信4.0图片.dat，解密文件，并生成图片
+    微信 4.x 图片 .dat 解密（支持 4.0/4.1）：
+      - 明文图片（视频缩略图 hash.jpg 等）直接复制
+      - V2 (07 08 V2 08 07)：AES-128-ECB 头部 + XOR 尾部（4.1 账号级密钥，MMKV 离线派生），wxgf 自动转码
+      - V1：固定 AES key
+      - 无签名：单字节 XOR 兜底
     :param xor_key: int 异或密钥
     :param file_path: dat文件路径
     :param out_path: 输出文件夹
     :param dst_name: 输出文件名，默认为输入文件名
-    :return:
+    :return: 输出文件路径，失败返回 ''
     """
-
     if not os.path.exists(file_path) or os.path.isdir(file_path):
         return ''
+    if not os.path.exists(out_path):
+        os.makedirs(out_path, exist_ok=True)
 
-    # 读取加密文件的内容
     with open(file_path, 'rb') as f:
-        header = f.read(0xf)
-        encrypt_length = struct.unpack_from('<H', header, 6)[0]
-        encrypt_length0 = encrypt_length // 16 * 16 + 16
-        encrypted_data = f.read(encrypt_length0)
-        res_data = f.read()
+        header = f.read(15)
+        rest = f.read()
 
-    # 如果数据不是16的倍数，填充0
-    if len(encrypted_data) % 16 != 0:
-        padding_length = 16 - (len(encrypted_data) % 16)
-        encrypted_data += b'\x00' * padding_length
-
-    aes_key = get_aes_key(header)
-
-    # 初始化AES解密器（ECB模式）
-    cipher = AES.new(aes_key, AES.MODE_ECB)
-
-    # 解密数据
-    decrypted_data = cipher.decrypt(encrypted_data)
-
-    # 获取图片后缀名
-    image_type = get_image_type(decrypted_data[:10])
     output_file_name = os.path.basename(file_path)[:-4] if not dst_name else dst_name
-    output_file = os.path.join(out_path, output_file_name + '.' + image_type)
-    if os.path.exists(output_file):
+
+    # 1) 明文图片直通（如视频缩略图 <md5>.jpg）
+    magic_ext = _sniff_image(header)
+    if magic_ext:
+        output_file = os.path.join(out_path, output_file_name + '.' + magic_ext)
+        if not os.path.exists(output_file):
+            with open(output_file, 'wb') as f:
+                f.write(header + rest)
         return output_file
 
-    # 移除填充（假设使用的是PKCS7或PKCS5填充）
-    pad_length = decrypted_data[-1]  # 获取填充长度
-    decrypted_data = decrypted_data[:-pad_length]
+    # 2) 微信 4.1 V2 格式（AES + XOR 账号级密钥 + wxgf）
+    if header.startswith(V2_MAGIC):
+        data = header + rest
+        img = decode_dat_v41(data, xor_key)
+        if img:
+            ext = _sniff_image(img) or ('wxgf' if img.startswith(b'wxgf') else 'jpg')
+            output_file = os.path.join(out_path, output_file_name + '.' + ext)
+            with open(output_file, 'wb') as f:
+                f.write(img)
+            return output_file
+        return ''
 
-    # 将解密后的数据写入输出文件
-    with open(output_file, 'wb') as f:
-        f.write(decrypted_data)
-        f.write(res_data[0:-0x100000])
-        f.write(bytes([byte ^ xor_key for byte in res_data[-0x100000:]]))
+    # 3) 微信 4.0 V1/V2 旧固定 key 逻辑
+    aes_key = get_aes_key(header)
+    if aes_key:
+        encrypt_length = struct.unpack_from('<H', header, 6)[0]
+        encrypt_length0 = encrypt_length // 16 * 16 + 16
+        encrypted_data = rest[:encrypt_length0]
+        res_data = rest[encrypt_length0:]
 
-    # print(f"解密完成，已保存到: {output_file}")
-    return output_file
+        # 如果数据不是16的倍数，填充0
+        if len(encrypted_data) % 16 != 0:
+            padding_length = 16 - (len(encrypted_data) % 16)
+            encrypted_data += b'\x00' * padding_length
+
+        # 初始化AES解密器（ECB模式）
+        cipher = AES.new(aes_key, AES.MODE_ECB)
+
+        # 解密数据
+        decrypted_data = cipher.decrypt(encrypted_data)
+
+        # 获取图片后缀名
+        image_type = get_image_type(decrypted_data[:10])
+        output_file = os.path.join(out_path, output_file_name + '.' + image_type)
+        if os.path.exists(output_file):
+            return output_file
+
+        # 移除填充（假设使用的是PKCS7或PKCS5填充）
+        pad_length = decrypted_data[-1]  # 获取填充长度
+        decrypted_data = decrypted_data[:-pad_length]
+
+        # 将解密后的数据写入输出文件
+        with open(output_file, 'wb') as f:
+            f.write(decrypted_data)
+            f.write(res_data[0:-0x100000])
+            f.write(bytes([byte ^ xor_key for byte in res_data[-0x100000:]]))
+
+        return output_file
+
+    # 4) 无签名：单字节 XOR 兜底（V0 旧格式）
+    image_type = get_image_type(bytes([header[0] ^ xor_key, header[1] ^ xor_key]) + b'\x00' * 8)
+    if image_type != 'bin':
+        output_file = os.path.join(out_path, output_file_name + '.' + image_type)
+        if not os.path.exists(output_file):
+            with open(output_file, 'wb') as f:
+                f.write(bytes(byte ^ xor_key for byte in header + rest))
+        return output_file
+    return ''
 
 
 async def decode_dat_v4_async(xor_key: int, file_path, out_path, dst_name='') -> str:

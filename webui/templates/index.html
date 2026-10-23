@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>留痕 · 聊天记录</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div id="app">
+  <!-- 左侧：会话列表 -->
+  <aside class="sidebar">
+    <div class="side-header">
+      <div class="me-avatar" id="meAvatar"></div>
+      <div class="side-title">留痕 · 微信聊天记录</div>
+    </div>
+    <div class="search-box">
+      <input type="text" id="searchInput" placeholder="搜索会话">
+    </div>
+    <div class="session-list" id="sessionList"></div>
+  </aside>
+
+  <!-- 右侧：聊天区 -->
+  <main class="chat-area">
+    <div class="chat-header">
+      <div class="chat-title" id="chatTitle">选择一个会话</div>
+      <div class="chat-sub" id="chatSub"></div>
+      <div class="export-wrap" id="exportWrap">
+        <button class="btn-export" id="btnExport">导出 ▾</button>
+        <div class="export-panel hidden" id="exportPanel">
+          <div class="exp-row">
+            <label>格式</label>
+            <div class="fmt-group" id="fmtGroup">
+              <button data-fmt="csv" class="active">CSV</button>
+              <button data-fmt="html">HTML</button>
+              <button data-fmt="txt">TXT</button>
+              <button data-fmt="json">JSON</button>
+            </div>
+          </div>
+          <div class="exp-row">
+            <label>范围</label>
+            <div class="fmt-group" id="daysGroup">
+              <button data-days="7">7天</button>
+              <button data-days="30" class="active">30天</button>
+              <button data-days="90">90天</button>
+              <button data-days="0">全部</button>
+            </div>
+          </div>
+          <div class="exp-tip" id="expTip">HTML 含图片/语音/视频，打包 zip 下载</div>
+          <button class="btn-do-export" id="btnDoExport">开始导出</button>
+        </div>
+      </div>
+    </div>
+    <div class="msg-scroll" id="msgScroll">
+      <div class="load-more hidden" id="loadMore">加载更多...</div>
+      <div class="msg-list" id="msgList"></div>
+    </div>
+  </main>
+</div>
+
+<!-- 图片放大层 -->
+<div class="lightbox hidden" id="lightbox"><img id="lightboxImg" alt=""></div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
