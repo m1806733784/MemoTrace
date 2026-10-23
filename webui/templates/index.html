@@ -3,63 +3,150 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>留痕 · 聊天记录</title>
+<title>留痕 · 微信聊天记录</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%2307c160'/%3E%3Cpath d='M16 7c-5 0-9 3.4-9 7.6 0 2.4 1.3 4.5 3.4 5.9L9.4 24l3.8-2c.9.2 1.8.4 2.8.4 5 0 9-3.4 9-7.6S21 7 16 7z' fill='%23fff'/%3E%3C/svg%3E">
 <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
 <div id="app">
-  <!-- 左侧：会话列表 -->
+
+  <!-- ══════════ 左侧：导航 + 会话列表 ══════════ -->
   <aside class="sidebar">
     <div class="side-header">
-      <div class="me-avatar" id="meAvatar"></div>
-      <div class="side-title">留痕 · 微信聊天记录</div>
+      <div class="brand">
+        <div class="brand-logo">痕</div>
+        <div class="brand-name">留痕</div>
+      </div>
+      <div class="conn-pill" id="connPill" title="微信连接状态">
+        <span class="conn-dot"></span><span id="connText">检测中</span>
+      </div>
     </div>
+
+    <!-- 同步控制条 -->
+    <div class="sync-strip" id="syncStrip">
+      <button class="btn-sync" id="btnSync" title="立即从微信同步最新聊天记录">
+        <svg class="icon-spin" id="syncIcon" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36M21 3v6h-6"/></svg>
+        <span>立即同步</span>
+      </button>
+      <label class="auto-toggle" title="开启后自动定时同步">
+        <input type="checkbox" id="autoChk">
+        <span class="switch"></span>
+        <span class="auto-label">自动</span>
+      </label>
+      <select id="intervalSel" class="interval-sel" title="自动同步间隔">
+        <option value="30">30秒</option>
+        <option value="60" selected>1分钟</option>
+        <option value="300">5分钟</option>
+      </select>
+    </div>
+    <div class="sync-meta" id="syncMeta">尚未同步</div>
+
     <div class="search-box">
+      <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
       <input type="text" id="searchInput" placeholder="搜索会话">
     </div>
-    <div class="session-list" id="sessionList"></div>
+
+    <div class="session-list" id="sessionList">
+      <div class="empty-mini">加载会话中…</div>
+    </div>
   </aside>
 
-  <!-- 右侧：聊天区 -->
+  <!-- ══════════ 右侧：聊天区 ══════════ -->
   <main class="chat-area">
     <div class="chat-header">
-      <div class="chat-title" id="chatTitle">选择一个会话</div>
-      <div class="chat-sub" id="chatSub"></div>
-      <div class="export-wrap" id="exportWrap">
-        <button class="btn-export" id="btnExport">导出 ▾</button>
-        <div class="export-panel hidden" id="exportPanel">
-          <div class="exp-row">
-            <label>格式</label>
-            <div class="fmt-group" id="fmtGroup">
-              <button data-fmt="csv" class="active">CSV</button>
-              <button data-fmt="html">HTML</button>
-              <button data-fmt="txt">TXT</button>
-              <button data-fmt="json">JSON</button>
+      <div class="chat-title-wrap">
+        <div class="chat-title" id="chatTitle">选择一个会话</div>
+        <div class="chat-sub" id="chatSub"></div>
+      </div>
+      <div class="chat-actions">
+        <button class="btn-tool" id="btnCalendar" title="按日期查看 / 跳转" disabled>
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="3" y="5" width="18" height="16" rx="2"/><path d="M8 3v4M16 3v4M3 10h18"/></svg>
+          <span>日历</span>
+        </button>
+        <div class="export-wrap">
+          <button class="btn-tool" id="btnExport" disabled>
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12m0 0 4-4m-4 4-4-4"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg>
+            <span>导出</span>
+          </button>
+          <div class="export-panel hidden" id="exportPanel">
+            <div class="exp-row">
+              <label>格式</label>
+              <div class="fmt-group" id="fmtGroup">
+                <button data-fmt="csv" class="active">CSV</button>
+                <button data-fmt="html">HTML</button>
+                <button data-fmt="txt">TXT</button>
+                <button data-fmt="json">JSON</button>
+              </div>
             </div>
-          </div>
-          <div class="exp-row">
-            <label>范围</label>
-            <div class="fmt-group" id="daysGroup">
-              <button data-days="7">7天</button>
-              <button data-days="30" class="active">30天</button>
-              <button data-days="90">90天</button>
-              <button data-days="0">全部</button>
+            <div class="exp-row">
+              <label>范围</label>
+              <div class="fmt-group" id="daysGroup">
+                <button data-days="7">7天</button>
+                <button data-days="30" class="active">30天</button>
+                <button data-days="90">90天</button>
+                <button data-days="0">全部</button>
+              </div>
             </div>
+            <div class="exp-tip" id="expTip">HTML 含图片/语音/视频，打包 zip 下载</div>
+            <button class="btn-primary btn-block" id="btnDoExport">开始导出</button>
           </div>
-          <div class="exp-tip" id="expTip">HTML 含图片/语音/视频，打包 zip 下载</div>
-          <button class="btn-do-export" id="btnDoExport">开始导出</button>
         </div>
       </div>
     </div>
+
     <div class="msg-scroll" id="msgScroll">
-      <div class="load-more hidden" id="loadMore">加载更多...</div>
+      <div class="load-more hidden" id="loadMore">查看更早消息</div>
       <div class="msg-list" id="msgList"></div>
+      <div class="chat-empty" id="chatEmpty">
+        <div class="chat-empty-icon">
+          <svg viewBox="0 0 24 24" width="42" height="42" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.5c0 4.1-4 7.5-9 7.5-1 0-2-.14-2.9-.4L5 20l1.2-3.2C4.2 15.4 3 13.6 3 11.5 3 7.4 7 4 12 4s9 3.4 9 7.5z"/></svg>
+        </div>
+        <div class="chat-empty-title">选择左侧会话，开始查看聊天记录</div>
+        <div class="chat-empty-sub">数据来自本机微信，点击「立即同步」获取最新消息</div>
+      </div>
     </div>
+
+    <button class="btn-latest hidden" id="btnLatest">
+      <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14m0 0 6-6m-6 6-6-6"/></svg>
+      回到最新
+    </button>
   </main>
+</div>
+
+<!-- 日历面板 -->
+<div class="cal-overlay hidden" id="calOverlay">
+  <div class="calendar-panel" id="calPanel">
+    <div class="cal-header">
+      <button class="cal-nav" id="calPrev"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M15 6l-6 6 6 6"/></svg></button>
+      <div class="cal-title" id="calTitle">2026年10月</div>
+      <button class="cal-nav" id="calNext"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg></button>
+    </div>
+    <div class="cal-grid cal-week">
+      <span>日</span><span>一</span><span>二</span><span>三</span><span>四</span><span>五</span><span>六</span>
+    </div>
+    <div class="cal-grid" id="calGrid"></div>
+    <div class="cal-legend">
+      <span><i class="dot dot-has"></i>有聊天记录</span>
+      <span><i class="dot dot-none"></i>无记录</span>
+    </div>
+  </div>
+</div>
+
+<!-- 同步结果面板 -->
+<div class="sync-result-overlay hidden" id="syncResultOverlay">
+  <div class="sync-result-panel">
+    <div class="sr-header">
+      <span>同步结果</span>
+      <button class="sr-close" id="srClose">✕</button>
+    </div>
+    <div class="sr-body" id="srBody"></div>
+  </div>
 </div>
 
 <!-- 图片放大层 -->
 <div class="lightbox hidden" id="lightbox"><img id="lightboxImg" alt=""></div>
+
+<div id="toast"></div>
 
 <script src="/static/app.js"></script>
 </body>

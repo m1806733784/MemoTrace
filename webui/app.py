@@ -1,9 +1,10 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-留痕 WebUI —— 仿微信界面的聊天记录可视化与导出
+留痕 WebUI —— 仿微信界面的聊天记录可视化、同步与导出
   浏览：左侧会话列表 + 右侧聊天窗口，支持文本/图片/语音/视频/文件/表情/引用等
-  媒体：服务端流式提供（图片 dat 解密、语音 silk->mp3、视频原样），浏览器直接播放
+  同步：检测微信登录状态；手动/自动增量同步（解密+WAL合并+原子替换+连接热重载）
+  日历：按天查看哪些日期有聊天记录，点击日期跳转
   导出：CSV / TXT / JSON / HTML(含媒体 zip)
 数据来源：已解密数据库（D:/Files/WeChatFiles/MemoTrace_数据/<wxid>/db_storage）
 """
@@ -11,9 +12,9 @@ import csv
 import io
 import json
 import os
-import shutil
 import sys
 import threading
+import time
 import zipfile
 from datetime import date, datetime, timedelta
 
@@ -29,14 +30,27 @@ from wxManager.decrypt.decrypt_dat import decode_dat_v4
 from exporter.exporter import decode_audio_to_mp3
 from exporter.exporter_html import HtmlExporter
 from exporter.config import FileType
+from sync_engine import sync_databases, wechat_running, has_changes
 
 app = Flask(__name__)
 DB_LOCK = threading.RLock()  # 串行化数据库访问（sqlite 连接跨线程共享）
+SYNC_LOCK = threading.Lock()  # 防止并发同步
 
 database = None
 CACHE_DIR = ''     # 媒体解密缓存根目录
 EXPORT_DIR = ''    # 导出产物根目录
 ME_WXID = ''
+DB_DIR = ''        # 解密数据库目录（热重载用）
+
+# 同步运行时状态（settings 持久化到磁盘）
+SYNC = {
+    'running': False,
+    'auto': False,          # 自动同步开关
+    'interval': 60,         # 自动同步间隔（秒）
+    'last_sync': 0,         # 上次同步时间戳
+    'last_result': None,    # {changed, skipped, sessions:[{name,range}], error}
+}
+SETTINGS_FILE = ''
 
 
 # ---------------------------------------------------------------- 初始化
@@ -49,6 +63,12 @@ def ensure_decrypted():
         raise RuntimeError('未提取到微信密钥，请先登录微信后重试')
     dest = os.path.join(OUT_ROOT, target.wxid)
     db_dir = os.path.join(dest, 'db_storage')
+    # 密钥持久化（同步功能复用，避免每次扫内存）
+    try:
+        with open(os.path.join(dest, 'key.json'), 'w', encoding='utf-8') as f:
+            json.dump({'key': target.key, 'wx_dir': target.wx_dir, 'time': time.time()}, f)
+    except OSError:
+        pass
     if not os.path.isfile(os.path.join(db_dir, 'contact', 'contact.db')):
         print('    正在解密数据库（首次运行约十几秒）...')
         decrypt_v4.decrypt_db_files(target.key, src_dir=target.wx_dir, dest_dir=dest)
@@ -63,8 +83,33 @@ def ensure_decrypted():
     return db_dir
 
 
+def _load_settings():
+    global SETTINGS_FILE
+    SETTINGS_FILE = os.path.join(OUT_ROOT, ME_WXID, 'webui_settings.json')
+    if os.path.isfile(SETTINGS_FILE):
+        try:
+            with open(SETTINGS_FILE, encoding='utf-8') as f:
+                s = json.load(f)
+            SYNC['auto'] = bool(s.get('auto', False))
+            SYNC['interval'] = max(15, int(s.get('interval', 60)))
+            SYNC['last_sync'] = float(s.get('last_sync', 0))
+            SYNC['last_result'] = s.get('last_result')
+        except Exception:
+            pass
+
+
+def _save_settings():
+    try:
+        with open(SETTINGS_FILE, 'w', encoding='utf-8') as f:
+            json.dump({'auto': SYNC['auto'], 'interval': SYNC['interval'],
+                       'last_sync': SYNC['last_sync'], 'last_result': SYNC['last_result'],
+                       }, f, ensure_ascii=False)
+    except OSError:
+        pass
+
+
 def init_database():
-    global database, CACHE_DIR, EXPORT_DIR, ME_WXID
+    global database, CACHE_DIR, EXPORT_DIR, ME_WXID, DB_DIR
     # 找已解密的账号
     candidates = []
     for wxid in os.listdir(OUT_ROOT):
@@ -81,6 +126,7 @@ def init_database():
     me = Me()
     me.wxid = wxid
     ME_WXID = wxid
+    DB_DIR = db_dir
     if os.path.isfile(info_file):
         with open(info_file, encoding='utf-8') as f:
             info = json.load(f)
@@ -96,6 +142,7 @@ def init_database():
     os.makedirs(os.path.join(CACHE_DIR, 'image'), exist_ok=True)
     os.makedirs(os.path.join(CACHE_DIR, 'voice'), exist_ok=True)
     os.makedirs(EXPORT_DIR, exist_ok=True)
+    _load_settings()
     # 预热 4.1 图片解密 key（MMKV 离线派生，写入磁盘缓存供多进程子进程使用）
     from wxManager.decrypt.decrypt_dat import get_v2_keys
     keys = get_v2_keys()
@@ -104,6 +151,163 @@ def init_database():
     else:
         print(f'[i] 图片解密 key 已派生（{len(keys)} 个候选）')
     print(f'[i] 账号 {wxid} 数据库已连接')
+
+
+# ---------------------------------------------------------------- 同步
+def _close_all_connections():
+    """关闭 manager 持有的全部 sqlite 连接（Windows 下替换文件前必须）"""
+    from wxManager.model.db_model import DataBaseBase
+    for v in vars(database).values():
+        if isinstance(v, DataBaseBase):
+            try:
+                v.close()
+            except Exception:
+                pass
+
+
+def _sessions_snapshot():
+    """{username: last_timestamp}，用于对比同步前后哪些会话有更新"""
+    try:
+        return {s[0]: s[4] for s in database.get_session() if s[0]}
+    except Exception:
+        return {}
+
+
+def _contact_name(username):
+    try:
+        c = database.get_contact_by_username(username)
+        if c is not None:
+            return c.remark or c.nickname or username
+    except Exception:
+        pass
+    return username
+
+
+def _fmt_range(ts1, ts2):
+    f1, f2 = '%m-%d %H:%M', '%m-%d %H:%M'
+    if ts1 and datetime.fromtimestamp(ts1).date() == datetime.fromtimestamp(ts2).date():
+        f2 = '%H:%M'
+    a = datetime.fromtimestamp(ts1).strftime(f1) if ts1 else '—'
+    b = datetime.fromtimestamp(ts2).strftime(f2)
+    return f'{a} ~ {b}'
+
+
+def do_sync(manual=False):
+    """增量同步：关闭连接 -> 解密变更库(含WAL) -> 原子替换 -> 重建连接 -> 汇报结果"""
+    global database
+    with SYNC_LOCK:
+        if SYNC['running']:
+            return {'running': True, 'last_result': SYNC['last_result']}
+        SYNC['running'] = True
+    result = {'error': None}
+    try:
+        if not wechat_running():
+            result['error'] = '未检测到微信，请先在本机登录微信'
+            SYNC['last_result'] = result
+            return result
+        wx_dir = Me().wx_dir
+        if not has_changes(wx_dir, OUT_ROOT, ME_WXID):
+            # 无变更：不关连接不重建，避免打断正在进行的请求
+            result['changed'] = 0
+            result['skipped'] = 0
+            result['sessions'] = []
+            result['has_update'] = False
+            SYNC['last_sync'] = time.time()
+            SYNC['last_result'] = result
+            _save_settings()
+            return result
+        before = {}
+        with DB_LOCK:
+            # 全程持锁：关闭连接->替换文件->重建连接，期间其他请求排队等待而非报错
+            before = _sessions_snapshot()
+            _close_all_connections()
+            try:
+                r = sync_databases(wx_dir, OUT_ROOT, ME_WXID)
+            except Exception as e:
+                r = {'changed': [], 'skipped': 0, 'error': f'{e}'}
+            database = DatabaseConnection(DB_DIR, 4).get_interface()
+            after = _sessions_snapshot()
+
+        result['changed'] = len(r.get('changed') or [])
+        result['skipped'] = r.get('skipped', 0)
+        result['error'] = r.get('error')
+        # 会话级变化：哪些聊天更新了、覆盖的时间段
+        sessions = []
+        for username, new_ts in after.items():
+            old_ts = before.get(username)
+            if not new_ts or (old_ts and new_ts <= old_ts):
+                continue
+            sessions.append({
+                'username': username,
+                'name': _contact_name(username),
+                'range': _fmt_range(old_ts or new_ts, new_ts),
+                'ts': new_ts,
+                'is_new': old_ts is None,
+            })
+        sessions.sort(key=lambda x: -x['ts'])
+        result['sessions'] = sessions[:50]
+        result['has_update'] = bool(sessions) or result['changed'] > 0
+        SYNC['last_sync'] = time.time()
+        SYNC['last_result'] = result
+        _save_settings()
+        return result
+    finally:
+        SYNC['running'] = False
+        _save_settings()
+
+
+def _auto_sync_loop():
+    while True:
+        try:
+            if SYNC['auto'] and not SYNC['running']:
+                do_sync()
+        except Exception:
+            pass
+        time.sleep(3)
+
+
+@app.route('/api/sync/status')
+def api_sync_status():
+    return jsonify({
+        'wechat_running': wechat_running(),
+        'running': SYNC['running'],
+        'auto': SYNC['auto'],
+        'interval': SYNC['interval'],
+        'last_sync': SYNC['last_sync'],
+        'last_result': SYNC['last_result'],
+        'me': {'wxid': ME_WXID, 'name': getattr(Me(), 'name', '') or ME_WXID},
+    })
+
+
+@app.route('/api/sync', methods=['POST'])
+def api_sync():
+    r = do_sync(manual=True)
+    return jsonify(r)
+
+
+@app.route('/api/sync/settings', methods=['POST'])
+def api_sync_settings():
+    data = request.get_json(silent=True) or {}
+    if 'auto' in data:
+        SYNC['auto'] = bool(data['auto'])
+    if 'interval' in data:
+        try:
+            SYNC['interval'] = max(15, int(data['interval']))
+        except (TypeError, ValueError):
+            pass
+    _save_settings()
+    return jsonify({'auto': SYNC['auto'], 'interval': SYNC['interval']})
+
+
+@app.route('/api/calendar')
+def api_calendar():
+    u = request.args.get('u', '')
+    with DB_LOCK:
+        try:
+            dates = database.get_messages_calendar(u) or []
+        except Exception:
+            dates = []
+    return jsonify({'dates': dates})
 
 
 # ---------------------------------------------------------------- 序列化
@@ -142,6 +346,7 @@ def serialize_message(msg, username):
         m['video'] = f'/api/media/video/{msg.server_id}?{u}'
         m['thumb'] = f'/api/media/video/{msg.server_id}?{u}&t=thumb'
         m['duration'] = getattr(msg, 'duration', 0)
+        m['video_ok'] = os.path.isfile(os.path.join(Me().wx_dir, getattr(msg, 'path', '') or 'x'))
     elif t == MessageType.Audio:
         m['voice'] = f'/api/media/voice/{msg.server_id}?{u}'
         m['duration'] = getattr(msg, 'duration', 0)
@@ -235,7 +440,17 @@ def api_messages():
     except ValueError:
         num = 50
     before = request.args.get('before', '')
-    start = int(before) if before else 2 ** 62
+    day = request.args.get('date', '')
+    if day:  # 跳转日期：取该日（次日元点）之前的最新消息
+        try:
+            d = datetime.strptime(day, '%Y-%m-%d')
+            start = int((d + timedelta(days=1)).timestamp() * 1000)
+        except ValueError:
+            start = 2 ** 62
+    elif before:
+        start = int(before)
+    else:
+        start = 2 ** 62
     with DB_LOCK:
         msgs, last_seq = database.get_messages_by_num(username, start, num)
         data = [serialize_message(x, username) for x in reversed(msgs)]  # 正序返回
@@ -279,6 +494,25 @@ def media_image(sid):
     return send_file(out, max_age=86400)
 
 
+def _video_thumb_file(msg):
+    """视频封面实际落盘名与 db 记录常不一致：依次尝试多个候选"""
+    wx_dir = Me().wx_dir
+    cands = []
+    tp = getattr(msg, 'thumb_path', '') or ''
+    p = getattr(msg, 'path', '') or ''
+    if tp:
+        cands.append(tp)
+    if p:
+        stem = os.path.splitext(p)[0]
+        cands.append(stem + '_thumb.jpg')
+        cands.append(stem + '.jpg')
+    for c in cands:
+        fp = os.path.join(wx_dir, c)
+        if os.path.isfile(fp):
+            return fp
+    return ''
+
+
 @app.route('/api/media/video/<sid>')
 def media_video(sid):
     username = request.args.get('u', '')
@@ -286,7 +520,9 @@ def media_video(sid):
     with DB_LOCK:
         msg = _get_message(username, sid)
     if kind == 'thumb':
-        src = os.path.join(Me().wx_dir, getattr(msg, 'thumb_path', '') or '')
+        src = _video_thumb_file(msg)
+        if not src:
+            abort(404, '封面不存在')
         out_dir = os.path.join(CACHE_DIR, 'image')
         name = f'vthumb_{sid}'
         cached = [f for f in os.listdir(out_dir) if f.startswith(name + '.')]
@@ -425,13 +661,10 @@ def api_export():
     abort(400, f'不支持的导出格式: {fmt}')
 
 
-def stamp_html():
-    return datetime.now().strftime('%Y%m%d_%H%M%S')
-
-
 if __name__ == '__main__':
     from multiprocessing import freeze_support
     freeze_support()
     init_database()
+    threading.Thread(target=_auto_sync_loop, daemon=True).start()
     print('[i] 留痕 WebUI 启动: http://127.0.0.1:5000')
     app.run(host='127.0.0.1', port=5000, threaded=True, use_reloader=False)
