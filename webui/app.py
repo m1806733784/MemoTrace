@@ -86,11 +86,12 @@ def ensure_decrypted():
 def _load_settings():
     global SETTINGS_FILE
     SETTINGS_FILE = os.path.join(OUT_ROOT, ME_WXID, 'webui_settings.json')
+    # auto 开关不做持久化：程序启动默认手动同步，需要自动时在界面开启
+    SYNC['auto'] = False
     if os.path.isfile(SETTINGS_FILE):
         try:
             with open(SETTINGS_FILE, encoding='utf-8') as f:
                 s = json.load(f)
-            SYNC['auto'] = bool(s.get('auto', False))
             SYNC['interval'] = max(15, int(s.get('interval', 60)))
             SYNC['last_sync'] = float(s.get('last_sync', 0))
             SYNC['last_result'] = s.get('last_result')
@@ -101,7 +102,7 @@ def _load_settings():
 def _save_settings():
     try:
         with open(SETTINGS_FILE, 'w', encoding='utf-8') as f:
-            json.dump({'auto': SYNC['auto'], 'interval': SYNC['interval'],
+            json.dump({'interval': SYNC['interval'],
                        'last_sync': SYNC['last_sync'], 'last_result': SYNC['last_result'],
                        }, f, ensure_ascii=False)
     except OSError:
