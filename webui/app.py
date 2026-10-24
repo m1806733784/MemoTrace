@@ -35,7 +35,12 @@ from exporter.exporter_html import HtmlExporter
 from exporter.config import FileType
 from sync_engine import sync_databases, wechat_running, has_changes
 
-app = Flask(__name__)
+# 打包 exe 时模板/静态资源在 sys._MEIPASS 根下（见 build-exe.yml 的 --add-data）
+_FROZEN = getattr(sys, 'frozen', False)
+_BASE_DIR = sys._MEIPASS if _FROZEN else os.path.dirname(os.path.abspath(__file__))
+app = Flask(__name__,
+            template_folder=os.path.join(_BASE_DIR, 'templates'),
+            static_folder=os.path.join(_BASE_DIR, 'static'))
 SYNC_LOCK = threading.Lock()  # 防止并发同步
 
 DB_POOL = None         # DBPool，init_database 里创建
@@ -684,9 +689,11 @@ def api_export():
 if __name__ == '__main__':
     from multiprocessing import freeze_support
     freeze_support()
+    import webbrowser
     init_database()
     threading.Thread(target=_auto_sync_loop, daemon=True).start()
-    print('[i] 留痕 WebUI 启动: http://127.0.0.1:5000')
-    import webbrowser
-    threading.Timer(1.5, webbrowser.open, args=['http://127.0.0.1:5000']).start()
-    app.run(host='127.0.0.1', port=5000, threaded=True, use_reloader=False)
+    port = int(os.environ.get('MEMOTRACE_WEBUI_PORT', 5000))
+    url = f'http://127.0.0.1:{port}'
+    print(f'[i] 留痕 WebUI 启动: {url}')
+    threading.Timer(1.5, webbrowser.open, args=[url]).start()
+    app.run(host='127.0.0.1', port=port, threaded=True, use_reloader=False)

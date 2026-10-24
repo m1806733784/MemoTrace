@@ -44,8 +44,8 @@ jobs:
         run: >
           pyinstaller --noconsole --onefile
           --name ${{ env.EXE_NAME }}
-          --add-data "webui/templates;webui/templates"
-          --add-data "webui/static;webui/static"
+          --add-data "webui/templates;templates"
+          --add-data "webui/static;static"
           ${{ env.MAIN_SCRIPT }}
 
       - name: Show output files

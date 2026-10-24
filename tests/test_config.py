@@ -53,6 +53,17 @@ class TestGetDataRoot(unittest.TestCase):
             os.environ.pop('MEMOTRACE_DATA_DIR', None)
             self.assertEqual(config.get_data_root(), config._DEFAULT_ROOT)
 
+    def test_frozen_mode_reads_config_beside_exe(self):
+        exe_side = os.path.join(self.tmp.name, 'appdir', 'config_local.json')
+        os.makedirs(os.path.dirname(exe_side), exist_ok=True)
+        with open(exe_side, 'w', encoding='utf-8') as f:
+            json.dump({'data_root': 'E:\\exe_side_data'}, f)
+        with mock.patch.object(config.sys, 'frozen', True, create=True), \
+                mock.patch.object(config.sys, 'executable', os.path.join(self.tmp.name, 'appdir', 'webui.exe')), \
+                mock.patch.object(config, '_LOCAL_CONFIG_FILE', os.path.join(self.tmp.name, 'missing.json')):
+            os.environ.pop('MEMOTRACE_DATA_DIR', None)
+            self.assertEqual(config.get_data_root(), 'E:\\exe_side_data')
+
 
 if __name__ == '__main__':
     unittest.main()
