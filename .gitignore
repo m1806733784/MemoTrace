@@ -21,6 +21,5 @@ server
 *.pyc
 *.bat
 *.log
-*.spec
-test*
 wordcloud.html
+config_local.json
