@@ -212,6 +212,10 @@ class DataBaseInterface(ABC):
     def get_contact_by_username(self, wxid: str) -> Contact:
         raise ValueError("子类必须实现该方法")
 
+    def get_contact_name_map(self) -> dict:
+        """{username: (remark, nick_name)}：批量取联系人名（会话列表用，避免 N+1）"""
+        raise ValueError("子类必须实现该方法")
+
     def get_chatroom_members(self, chatroom_name) -> dict[Any, Contact] | Any:
         """
         获取群成员（不包括企业微信联系人）

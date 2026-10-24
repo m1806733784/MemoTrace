@@ -120,7 +120,7 @@
 [使用示例](./example/README.md)
 [详见开发者手册](./doc/开发者手册.md)
 
-[AI聊天](./MemoAI/readme.md)
+[AI聊天（大模型微调指南）](./doc/MemoAI/readme.md)
 
 ## PC端使用过程中部分问题解决（可参考）
 

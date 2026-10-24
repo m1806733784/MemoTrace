@@ -35,6 +35,11 @@ class DatabaseConnection:
     def get_interface(self) -> DataBaseInterface:
         return self._initialize_database()
 
+    def close(self):
+        """关闭接口持有的全部子库连接（同步替换 db 文件前必须调用）"""
+        if self.database_interface is not None:
+            self.database_interface.close()
+
 
 """
 使用示例：

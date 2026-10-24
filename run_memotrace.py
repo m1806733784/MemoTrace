@@ -2,10 +2,10 @@
 # -*- coding: utf-8 -*-
 """
 留痕（MemoTrace）一键运行脚本（本 worktree 为核心库，无 GUI，走示例流程）：
-  1. 从运行中的微信 4.x 提取密钥（已适配微信 4.1）
-  2. 解密当前登录账号的全部数据库 -> OUT_ROOT/<wxid>/
+  1. 从运行中的微信 4.x 提取密钥（已适配微信 4.1），刷新 key.json / info.json
+  2. 解密当前登录账号的全部数据库 -> OUT_ROOT/<wxid>/（已有解密数据自动跳过）
   3. 打开解密后的数据库，导出最近聊天会话的 HTML
-可重复运行：已有解密数据时自动跳过解密，直接导出。
+可重复运行。
 """
 import os
 import sys
@@ -13,8 +13,8 @@ import sys
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, PROJECT_ROOT)
 
-# 解密数据输出位置（config_local.json / 环境变量 MEMOTRACE_DATA_DIR 可改）
 from config import get_data_root
+from webui.bootstrap import ensure_decrypted, open_database
 
 OUT_ROOT = get_data_root()
 
@@ -30,52 +30,19 @@ def get_session_username(session):
 
 
 def main():
-    import json
-    import time
-    from wxManager import Me, DatabaseConnection
-    from wxManager.decrypt import get_info_v4, decrypt_v4
-    from wxManager.decrypt.decrypt_dat import get_decode_code_v4
+    from datetime import date, timedelta
     from exporter import HtmlExporter
     from exporter.config import FileType
 
-    print('[1/4] 提取微信密钥（微信需已登录）...')
-    infos = get_info_v4()
-    target = None
-    for info in infos:
-        print(f'    {info}')
-        if info.key:
-            target = info
-    if target is None:
-        print('[!] 未提取到密钥，请确认微信已登录后重试')
-        return 1
+    print('[1/3] 提取微信密钥并确保解密数据（微信需已登录）...')
+    db_dir = ensure_decrypted(OUT_ROOT, verbose=True)
+    from wxManager import Me
+    wxid = Me().wxid
+    dest = os.path.dirname(db_dir)
+    print(f'    账号 {wxid}，数据库: {db_dir}')
 
-    dest = os.path.join(OUT_ROOT, target.wxid)
-    db_dir = os.path.join(dest, 'db_storage')
-    os.makedirs(db_dir, exist_ok=True)
-
-    # 设置 Me 单例（导出器读取头像、媒体路径要用）
-    me = Me()
-    me.wx_dir = target.wx_dir
-    me.wxid = target.wxid
-    me.name = target.nick_name
-    try:
-        me.xor_key = get_decode_code_v4(target.wx_dir)
-    except Exception:
-        me.xor_key = 0
-    with open(os.path.join(db_dir, 'info.json'), 'w', encoding='utf-8') as f:
-        json.dump(me.to_json(), f, ensure_ascii=False, indent=4)
-
-    print(f'[2/4] 解密数据库 -> {dest}')
-    if os.path.isfile(os.path.join(db_dir, 'contact', 'contact.db')):
-        print('    已有解密数据，跳过解密')
-    else:
-        t0 = time.time()
-        decrypt_v4.decrypt_db_files(target.key, src_dir=target.wx_dir, dest_dir=dest)
-        print(f'    解密完成，耗时 {time.time() - t0:.1f}s')
-
-    print('[3/4] 打开数据库...')
-    conn = DatabaseConnection(db_dir, 4)
-    database = conn.get_interface()
+    print('[2/3] 打开数据库...')
+    database = open_database(db_dir)
     contacts = database.get_contacts()
     print(f'    联系人 {len(contacts)} 个')
     sessions = database.get_session()
@@ -83,8 +50,7 @@ def main():
         print('[!] 没有会话记录')
         return 1
 
-    print('[4/4] 导出最近聊天会话 HTML（限最近 30 天，避免超大会话耗时过久）...')
-    from datetime import date, timedelta
+    print('[3/3] 导出最近聊天会话 HTML（限最近 30 天，避免超大会话耗时过久）...')
     end = date.today() + timedelta(days=1)
     start = end - timedelta(days=31)
     time_range = (start, end)
@@ -108,7 +74,8 @@ def main():
     exporter.start()
 
     html_dir = os.path.join(output_dir, '聊天记录', f'{contact.remark}({contact.wxid})')
-    print(f'[OK] 全部完成！')
+    database.close()
+    print('[OK] 全部完成！')
     print(f'     解密数据库: {db_dir}')
     print(f'     HTML 聊天记录: {html_dir}')
     return 0

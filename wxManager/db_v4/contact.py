@@ -100,6 +100,15 @@ WHERE username=?
             return result
         return None
 
+    def get_contact_name_map(self) -> dict:
+        """{username: (remark, nick_name)}：一次查询全表，供会话列表批量取名"""
+        sql = 'SELECT username, remark, nick_name FROM contact'
+        cursor = self.DB.cursor()
+        cursor.execute(sql)
+        result = {row[0]: (row[1], row[2]) for row in cursor.fetchall()}
+        cursor.close()
+        return result
+
     def get_chatroom_info(self, username):
         sql = '''
 select id,ext_buffer,username,owner

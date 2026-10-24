@@ -25,6 +25,7 @@ from wxManager.db_v4.emotion import EmotionDB
 from wxManager.db_v4.media import MediaDB
 from wxManager.db_v4 import ContactDB, HeadImageDB, SessionDB, MessageDB, HardLinkDB
 from wxManager.db_main import DataBaseInterface, Context
+from wxManager.model.db_model import DataBaseBase
 from wxManager.model.contact import Contact, ContactType, Person
 from wxManager.model import Me
 from wxManager.parser.util.protocbuf.roomdata_pb2 import ChatRoomData
@@ -105,10 +106,13 @@ class DataBaseV4(DataBaseInterface):
         return flag
 
     def close(self):
-        pass
-
-        # self.head_image_db.close()
-        # self.contact_db.close()
+        """关闭全部子库连接（同步替换 db 文件前必须调用）"""
+        for value in vars(self).values():
+            if isinstance(value, DataBaseBase):
+                try:
+                    value.close()
+                except Exception:
+                    pass
 
     def get_session(self):
         """
@@ -116,6 +120,10 @@ class DataBaseV4(DataBaseInterface):
         @return:
         """
         return self.session_db.get_session()
+
+    def get_contact_name_map(self) -> dict:
+        """{username: (remark, nick_name)}：一次查询供会话列表批量取名，避免逐个 N+1"""
+        return self.contact_db.get_contact_name_map()
 
     def get_messages(
             self,
