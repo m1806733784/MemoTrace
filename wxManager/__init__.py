@@ -11,7 +11,6 @@ from .log import logger
 from .model import Me, MessageType, Message, Person, Contact, TextMessage, ImageMessage
 from .db_main import DataBaseInterface
 from .manager_v4 import DataBaseV4
-from .manager_v3 import DataBaseV3
 
 __version__ = '3.1.0'
 
@@ -23,14 +22,14 @@ class DatabaseConnection:
         self.database_interface = self._initialize_database()
 
     def _initialize_database(self) -> DataBaseInterface:
-        if self.db_version == 4:
-            database0 = DataBaseV4()
-        else:
-            database0 = DataBaseV3()
+        if self.db_version != 4:
+            raise ValueError(f'仅支持微信4.x数据库（db_version=4），收到: {self.db_version}。'
+                             f'微信3.x支持已封存至 legacy/v3 分支')
+        database0 = DataBaseV4()
         if database0.init_database(self.db_dir):
             return database0
         else:
-            logger.error(f'数据库初始化失败, 请检查路径或数据库版本是否正确, db_dir:{self.db_dir},db_version:{self.db_version}')
+            logger.error(f'数据库初始化失败, 请检查路径或数据库版本是否正确, db_dir:{self.db_dir}')
             return None
 
     def get_interface(self) -> DataBaseInterface:
