@@ -1,0 +1,3 @@
+# WebUI 与微信通道的额外依赖（核心解密/导出见 requirements.txt）
+flask~=3.1
+uiautomation~=2.0.20

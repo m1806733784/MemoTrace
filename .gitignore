@@ -17,6 +17,7 @@ server
 *.bin
 *.json
 *.txt
+!requirements*.txt
 *.ui
 *.pyc
 *.bat

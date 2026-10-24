@@ -6,7 +6,7 @@
   同步：检测微信登录状态；手动/自动增量同步（解密+WAL合并+原子替换+连接热重载）
   日历：按天查看哪些日期有聊天记录，点击日期跳转
   导出：CSV / TXT / JSON / HTML(含媒体 zip)
-数据来源：已解密数据库（D:/Files/WeChatFiles/MemoTrace_数据/<wxid>/db_storage）
+数据来源：已解密数据库（数据根目录/<wxid>/db_storage，见 config.py）
 """
 import csv
 import io
@@ -21,7 +21,9 @@ from datetime import date, datetime, timedelta
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, PROJECT_ROOT)
 
-OUT_ROOT = r'D:\Files\WeChatFiles\MemoTrace_数据'
+from config import get_data_root
+
+OUT_ROOT = get_data_root()
 
 from flask import Flask, Response, abort, jsonify, render_template, request, send_file
 
@@ -665,7 +667,9 @@ def api_export():
 if __name__ == '__main__':
     from multiprocessing import freeze_support
     freeze_support()
+    import webbrowser
     init_database()
     threading.Thread(target=_auto_sync_loop, daemon=True).start()
     print('[i] 留痕 WebUI 启动: http://127.0.0.1:5000')
+    threading.Timer(1.5, webbrowser.open, args=['http://127.0.0.1:5000']).start()
     app.run(host='127.0.0.1', port=5000, threaded=True, use_reloader=False)

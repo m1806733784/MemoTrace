@@ -13,8 +13,10 @@ import sys
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, PROJECT_ROOT)
 
-# 解密数据输出位置（不要放在仓库里）
-OUT_ROOT = r'D:\Files\WeChatFiles\MemoTrace_数据'
+# 解密数据输出位置（config_local.json / 环境变量 MEMOTRACE_DATA_DIR 可改）
+from config import get_data_root
+
+OUT_ROOT = get_data_root()
 
 
 def get_session_username(session):

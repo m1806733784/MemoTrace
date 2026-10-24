@@ -321,8 +321,9 @@ def get_info(version_list):
 
 if __name__ == "__main__":
     import json
+    import os
 
-    file_path = r'E:\Project\Python\MemoTrace\resources\data\version_list.json'
+    file_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'version_list.json')
     with open(file_path, "r", encoding="utf-8") as f:
         version_list = json.loads(f.read())
     wx_info = get_info_v3(version_list)
