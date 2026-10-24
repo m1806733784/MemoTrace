@@ -5,7 +5,8 @@
   浏览：左侧会话列表 + 右侧聊天窗口，支持文本/图片/语音/视频/文件/表情/引用等
   同步：检测微信登录状态；手动/自动增量同步（解密+WAL合并+原子替换+连接热重载）
   日历：按天查看哪些日期有聊天记录，点击日期跳转
-  导出：CSV / TXT / JSON / HTML(含媒体 zip)
+  导出：CSV / TXT / JSON 同步下载；HTML(含媒体 zip) 后台任务 + 轮询下载
+数据库访问：DBPool 连接池，每个请求独占实例并发读（见 db_pool.py）
 数据来源：已解密数据库（数据根目录/<wxid>/db_storage，见 config.py）
 """
 import csv
@@ -21,13 +22,13 @@ from datetime import date, datetime, timedelta
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, PROJECT_ROOT)
 
-from config import get_data_root
-
-OUT_ROOT = get_data_root()
+import bootstrap
+from bootstrap import OUT_ROOT
+from db_pool import DBPool
 
 from flask import Flask, Response, abort, jsonify, render_template, request, send_file
 
-from wxManager import Me, DatabaseConnection, MessageType
+from wxManager import Me, MessageType
 from wxManager.decrypt.decrypt_dat import decode_dat_v4
 from exporter.exporter import decode_audio_to_mp3
 from exporter.exporter_html import HtmlExporter
@@ -35,14 +36,13 @@ from exporter.config import FileType
 from sync_engine import sync_databases, wechat_running, has_changes
 
 app = Flask(__name__)
-DB_LOCK = threading.RLock()  # 串行化数据库访问（sqlite 连接跨线程共享）
 SYNC_LOCK = threading.Lock()  # 防止并发同步
 
-database = None
-CACHE_DIR = ''     # 媒体解密缓存根目录
-EXPORT_DIR = ''    # 导出产物根目录
+DB_POOL = None         # DBPool，init_database 里创建
+CACHE_DIR = ''         # 媒体解密缓存根目录
+EXPORT_DIR = ''        # 导出产物根目录
 ME_WXID = ''
-DB_DIR = ''        # 解密数据库目录（热重载用）
+DB_DIR = ''            # 解密数据库目录（热重载用）
 
 # 同步运行时状态（settings 持久化到磁盘）
 SYNC = {
@@ -54,37 +54,19 @@ SYNC = {
 }
 SETTINGS_FILE = ''
 
+# 联系人名缓存（会话列表批量取名，避免每个会话一次单查）
+_NAME_TTL = 30.0
+_NAME_CACHE = {'ts': 0.0, 'map': {}}
+
+# HTML 后台导出任务表 {id: job}
+EXPORT_JOBS = {}
+_EXPORT_LOCK = threading.Lock()
+
+# 媒体解密缓存的候选扩展名（decode_dat_v4 落盘后缀全集）
+_CACHE_EXTS = ('jpg', 'png', 'gif', 'bmp', 'webp', 'wxgf')
+
 
 # ---------------------------------------------------------------- 初始化
-def ensure_decrypted():
-    """没有解密数据时，现场提取密钥并解密（需微信已登录）"""
-    from wxManager.decrypt import get_info_v4, decrypt_v4
-    infos = get_info_v4()
-    target = next((i for i in infos if i.key), None)
-    if target is None:
-        raise RuntimeError('未提取到微信密钥，请先登录微信后重试')
-    dest = os.path.join(OUT_ROOT, target.wxid)
-    db_dir = os.path.join(dest, 'db_storage')
-    # 密钥持久化（同步功能复用，避免每次扫内存）
-    try:
-        with open(os.path.join(dest, 'key.json'), 'w', encoding='utf-8') as f:
-            json.dump({'key': target.key, 'wx_dir': target.wx_dir, 'time': time.time()}, f)
-    except OSError:
-        pass
-    if not os.path.isfile(os.path.join(db_dir, 'contact', 'contact.db')):
-        print('    正在解密数据库（首次运行约十几秒）...')
-        decrypt_v4.decrypt_db_files(target.key, src_dir=target.wx_dir, dest_dir=dest)
-    me = Me()
-    me.wxid, me.wx_dir = target.wxid, target.wx_dir
-    me.name = target.nick_name or target.wxid
-    from wxManager.decrypt.decrypt_dat import get_decode_code_v4
-    try:
-        me.xor_key = get_decode_code_v4(me.wx_dir)
-    except Exception:
-        me.xor_key = 0
-    return db_dir
-
-
 def _load_settings():
     global SETTINGS_FILE
     SETTINGS_FILE = os.path.join(OUT_ROOT, ME_WXID, 'webui_settings.json')
@@ -112,34 +94,14 @@ def _save_settings():
 
 
 def init_database():
-    global database, CACHE_DIR, EXPORT_DIR, ME_WXID, DB_DIR
-    # 找已解密的账号
-    candidates = []
-    for wxid in os.listdir(OUT_ROOT):
-        db_dir = os.path.join(OUT_ROOT, wxid, 'db_storage')
-        if os.path.isfile(os.path.join(db_dir, 'contact', 'contact.db')):
-            candidates.append((wxid, db_dir))
-    if not candidates:
-        db_dir = ensure_decrypted()
-        wxid = Me().wxid
-    else:
-        wxid, db_dir = candidates[0]  # 单账号场景
-
-    info_file = os.path.join(db_dir, 'info.json')
+    global DB_POOL, CACHE_DIR, EXPORT_DIR, ME_WXID, DB_DIR
+    wxid, db_dir = bootstrap.init_account(OUT_ROOT)
     me = Me()
-    me.wxid = wxid
-    ME_WXID = wxid
-    DB_DIR = db_dir
-    if os.path.isfile(info_file):
-        with open(info_file, encoding='utf-8') as f:
-            info = json.load(f)
-        me.wx_dir = info.get('wx_dir', '')
-        me.name = info.get('name', wxid)
-        me.xor_key = info.get('xor_key', 0)
     if not getattr(me, 'wx_dir', ''):
         raise RuntimeError('info.json 缺少 wx_dir，请先运行 run_memotrace.py')
+    ME_WXID, DB_DIR = wxid, db_dir
+    DB_POOL = DBPool(lambda: bootstrap.open_database(db_dir))
 
-    database = DatabaseConnection(db_dir, 4).get_interface()
     CACHE_DIR = os.path.join(OUT_ROOT, wxid, 'media_cache')
     EXPORT_DIR = os.path.join(OUT_ROOT, wxid, '导出UI')
     os.makedirs(os.path.join(CACHE_DIR, 'image'), exist_ok=True)
@@ -157,18 +119,7 @@ def init_database():
 
 
 # ---------------------------------------------------------------- 同步
-def _close_all_connections():
-    """关闭 manager 持有的全部 sqlite 连接（Windows 下替换文件前必须）"""
-    from wxManager.model.db_model import DataBaseBase
-    for v in vars(database).values():
-        if isinstance(v, DataBaseBase):
-            try:
-                v.close()
-            except Exception:
-                pass
-
-
-def _sessions_snapshot():
+def _sessions_snapshot(database):
     """{username: last_timestamp}，用于对比同步前后哪些会话有更新"""
     try:
         return {s[0]: s[4] for s in database.get_session() if s[0]}
@@ -176,14 +127,21 @@ def _sessions_snapshot():
         return {}
 
 
-def _contact_name(username):
-    try:
-        c = database.get_contact_by_username(username)
-        if c is not None:
-            return c.remark or c.nickname or username
-    except Exception:
-        pass
-    return username
+def _contact_names(database) -> dict:
+    """{username: (remark, nick_name)}，带 TTL 缓存"""
+    now = time.time()
+    if now - _NAME_CACHE['ts'] > _NAME_TTL:
+        try:
+            _NAME_CACHE['map'] = database.get_contact_name_map() or {}
+            _NAME_CACHE['ts'] = now
+        except Exception:
+            pass
+    return _NAME_CACHE['map']
+
+
+def _name_of(names: dict, username: str) -> str:
+    remark, nickname = names.get(username, ('', ''))
+    return remark or nickname or username
 
 
 def _fmt_range(ts1, ts2):
@@ -196,8 +154,7 @@ def _fmt_range(ts1, ts2):
 
 
 def do_sync(manual=False):
-    """增量同步：关闭连接 -> 解密变更库(含WAL) -> 原子替换 -> 重建连接 -> 汇报结果"""
-    global database
+    """增量同步：等在用连接归还 -> 关闭全部连接 -> 解密变更库(含WAL) -> 原子替换 -> 新建连接"""
     with SYNC_LOCK:
         if SYNC['running']:
             return {'running': True, 'last_result': SYNC['last_result']}
@@ -210,7 +167,7 @@ def do_sync(manual=False):
             return result
         wx_dir = Me().wx_dir
         if not has_changes(wx_dir, OUT_ROOT, ME_WXID):
-            # 无变更：不关连接不重建，避免打断正在进行的请求
+            # 无变更：不动连接，避免打断正在进行的请求
             result['changed'] = 0
             result['skipped'] = 0
             result['sessions'] = []
@@ -219,17 +176,17 @@ def do_sync(manual=False):
             SYNC['last_result'] = result
             _save_settings()
             return result
-        before = {}
-        with DB_LOCK:
-            # 全程持锁：关闭连接->替换文件->重建连接，期间其他请求排队等待而非报错
-            before = _sessions_snapshot()
-            _close_all_connections()
+        with DB_POOL.checkout() as database:
+            before = _sessions_snapshot(database)
+        with DB_POOL.exclusive():  # 等全部请求结束并关闭连接后再替换文件
             try:
                 r = sync_databases(wx_dir, OUT_ROOT, ME_WXID)
             except Exception as e:
                 r = {'changed': [], 'skipped': 0, 'error': f'{e}'}
-            database = DatabaseConnection(DB_DIR, 4).get_interface()
-            after = _sessions_snapshot()
+        _NAME_CACHE['ts'] = 0  # 联系人可能有更新
+        with DB_POOL.checkout() as database:
+            after = _sessions_snapshot(database)
+            names = _contact_names(database)
 
         result['changed'] = len(r.get('changed') or [])
         result['skipped'] = r.get('skipped', 0)
@@ -242,7 +199,7 @@ def do_sync(manual=False):
                 continue
             sessions.append({
                 'username': username,
-                'name': _contact_name(username),
+                'name': _name_of(names, username),
                 'range': _fmt_range(old_ts or new_ts, new_ts),
                 'ts': new_ts,
                 'is_new': old_ts is None,
@@ -305,7 +262,7 @@ def api_sync_settings():
 @app.route('/api/calendar')
 def api_calendar():
     u = request.args.get('u', '')
-    with DB_LOCK:
+    with DB_POOL.checkout() as database:
         try:
             dates = database.get_messages_calendar(u) or []
         except Exception:
@@ -389,38 +346,31 @@ def index():
 @app.route('/api/sessions')
 def api_sessions():
     out = []
-    with DB_LOCK:
+    with DB_POOL.checkout() as database:
         sessions = database.get_session()
-        for s in sessions:
-            username = s[0]
-            if not username:
-                continue
-            last_timestamp = s[4]
-            summary = s[5] or ''
-            try:
-                contact = database.get_contact_by_username(username)
-            except Exception:
-                contact = None
-            if contact is not None:
-                name = contact.remark or contact.nickname or username
-            else:
-                name = username
-            out.append({
-                'username': username,
-                'name': name,
-                'avatar': f'/api/avatar/{username}',
-                'time': datetime.fromtimestamp(last_timestamp).strftime('%m/%d') if last_timestamp else '',
-                'ts': last_timestamp,
-                'summary': summary[:60],
-                'is_chatroom': username.endswith('@chatroom'),
-            })
+        names = _contact_names(database)
+    for s in sessions:
+        username = s[0]
+        if not username:
+            continue
+        last_timestamp = s[4]
+        summary = s[5] or ''
+        out.append({
+            'username': username,
+            'name': _name_of(names, username),
+            'avatar': f'/api/avatar/{username}',
+            'time': datetime.fromtimestamp(last_timestamp).strftime('%m/%d') if last_timestamp else '',
+            'ts': last_timestamp,
+            'summary': summary[:60],
+            'is_chatroom': username.endswith('@chatroom'),
+        })
     return jsonify(out)
 
 
 @app.route('/api/avatar/<wxid>')
 def api_avatar(wxid):
     buf = b''
-    with DB_LOCK:
+    with DB_POOL.checkout() as database:
         try:
             buf = database.get_avatar_buffer(wxid) or b''
         except Exception:
@@ -454,7 +404,7 @@ def api_messages():
         start = int(before)
     else:
         start = 2 ** 62
-    with DB_LOCK:
+    with DB_POOL.checkout() as database:
         msgs, last_seq = database.get_messages_by_num(username, start, num)
         data = [serialize_message(x, username) for x in reversed(msgs)]  # 正序返回
     return jsonify({
@@ -465,29 +415,38 @@ def api_messages():
 
 
 # ---------------------------------------------------------------- 媒体
-def _get_message(username, sid):
+def _get_message(database, username, sid):
     msg = database.get_message_by_server_id(username, int(sid))
     if msg is None:
         abort(404, '消息不存在（可能未包含在该账号数据库中）')
     return msg
 
 
+def _cached_media(out_dir: str, name: str) -> str:
+    """按已知扩展名直查缓存，避免每次请求 os.listdir 扫全目录"""
+    for ext in _CACHE_EXTS:
+        path = os.path.join(out_dir, f'{name}.{ext}')
+        if os.path.isfile(path):
+            return path
+    return ''
+
+
 @app.route('/api/media/image/<sid>')
 def media_image(sid):
     username = request.args.get('u', '')
     kind = request.args.get('t', 'raw')
-    with DB_LOCK:
-        msg = _get_message(username, sid)
+    with DB_POOL.checkout() as database:
+        msg = _get_message(database, username, sid)
     src_rel = getattr(msg, 'thumb_path', '') if kind == 'thumb' else getattr(msg, 'path', '')
     if not src_rel:
         abort(404, '图片文件缺失（可能未下载）')
     src = os.path.join(Me().wx_dir, src_rel)
     out_dir = os.path.join(CACHE_DIR, 'image')
     name = f'{kind}_{sid}'
-    cached = [f for f in os.listdir(out_dir) if f.startswith(name + '.')]
+    cached = _cached_media(out_dir, name)
     if cached:
-        return send_file(os.path.join(out_dir, cached[0]), max_age=86400)
-    with DB_LOCK:
+        return send_file(cached, max_age=86400)
+    with DB_POOL.checkout() as database:
         try:
             out = decode_dat_v4(Me().xor_key, src, out_dir, name)
         except Exception:
@@ -520,17 +479,17 @@ def _video_thumb_file(msg):
 def media_video(sid):
     username = request.args.get('u', '')
     kind = request.args.get('t', 'raw')
-    with DB_LOCK:
-        msg = _get_message(username, sid)
+    with DB_POOL.checkout() as database:
+        msg = _get_message(database, username, sid)
     if kind == 'thumb':
         src = _video_thumb_file(msg)
         if not src:
             abort(404, '封面不存在')
         out_dir = os.path.join(CACHE_DIR, 'image')
         name = f'vthumb_{sid}'
-        cached = [f for f in os.listdir(out_dir) if f.startswith(name + '.')]
+        cached = _cached_media(out_dir, name)
         if cached:
-            return send_file(os.path.join(out_dir, cached[0]), max_age=86400)
+            return send_file(cached, max_age=86400)
         try:
             out = decode_dat_v4(Me().xor_key, src, out_dir, name)
         except Exception:
@@ -550,8 +509,8 @@ def media_voice(sid):
     out_dir = os.path.join(CACHE_DIR, 'voice')
     mp3 = os.path.join(out_dir, f'{sid}.mp3')
     if not os.path.isfile(mp3):
-        with DB_LOCK:
-            msg = _get_message(username, sid)
+        with DB_POOL.checkout() as database:
+            msg = _get_message(database, username, sid)
             buf = database.get_media_buffer(msg.server_id) or b''
         if not buf:
             abort(404, '语音数据缺失')
@@ -564,8 +523,8 @@ def media_voice(sid):
 @app.route('/api/media/file/<sid>')
 def media_file(sid):
     username = request.args.get('u', '')
-    with DB_LOCK:
-        msg = _get_message(username, sid)
+    with DB_POOL.checkout() as database:
+        msg = _get_message(database, username, sid)
     src = os.path.join(Me().wx_dir, getattr(msg, 'path', '') or '')
     if not os.path.isfile(src):
         abort(404, '文件缺失（可能未下载）')
@@ -582,7 +541,7 @@ def _time_range(days):
 
 
 def _messages_rows(username, time_range):
-    with DB_LOCK:
+    with DB_POOL.checkout() as database:
         messages = database.get_messages(username, time_range)
     rows = []
     for msg in messages:
@@ -600,18 +559,100 @@ def _messages_rows(username, time_range):
     return rows
 
 
+def _prune_export_jobs(keep=20):
+    """只保留最近 keep 个任务记录（zip 文件不删）"""
+    while len(EXPORT_JOBS) > keep:
+        EXPORT_JOBS.pop(next(iter(EXPORT_JOBS)))
+
+
+def _run_html_export(job_id, username, contact, days):
+    """后台线程：完整 HTML 导出（含媒体）并打包 zip。用独立数据库实例，不占请求池。"""
+    job = EXPORT_JOBS[job_id]
+    database = None
+    try:
+        time_range = _time_range(days)
+        name = contact.remark or contact.nickname or username
+        safe_name = ''.join(c for c in name if c not in '\\/:*?"<>|') or username
+        days_tag = f'{days}天'
+        work = os.path.join(EXPORT_DIR, f'{safe_name}_{days_tag}')  # 固定目录，覆盖复用
+        database = bootstrap.open_database(DB_DIR)
+        exporter = HtmlExporter(database, contact, output_dir=work,
+                                type_=FileType.HTML, time_range=time_range)
+        exporter.start()
+        html_root = os.path.join(work, '聊天记录')
+        html_dirs = [os.path.join(html_root, d) for d in os.listdir(html_root)] \
+            if os.path.isdir(html_root) else []
+        if not html_dirs:
+            raise RuntimeError('HTML 导出未产生结果')
+        src_dir = html_dirs[0]
+        zpath = os.path.join(EXPORT_DIR, f'{safe_name}_{days_tag}.zip')
+        if os.path.exists(zpath):
+            os.remove(zpath)
+        with zipfile.ZipFile(zpath, 'w', zipfile.ZIP_DEFLATED) as zf:
+            for root, _, files in os.walk(src_dir):
+                for fn in files:
+                    fp = os.path.join(root, fn)
+                    zf.write(fp, os.path.relpath(fp, src_dir))
+        job.update(status='done', zip=zpath, filename=os.path.basename(zpath))
+    except Exception as e:
+        job.update(status='error', error=f'{e}')
+    finally:
+        if database is not None:
+            try:
+                database.close()
+            except Exception:
+                pass
+
+
+@app.route('/api/export/start')
+def api_export_start():
+    """启动 HTML 后台导出，返回任务 id（前端轮询 progress，完成后 download）"""
+    username = request.args.get('u', '')
+    try:
+        days = int(request.args.get('days', 30))
+    except ValueError:
+        days = 30
+    with DB_POOL.checkout() as database:
+        contact = database.get_contact_by_username(username)
+        if contact is None:
+            abort(404, '联系人不存在')
+    job_id = f'{int(time.time() * 1000)}_{username[-8:]}'
+    job = {'status': 'running', 'error': None, 'name': username, 'filename': '', 'zip': ''}
+    with _EXPORT_LOCK:
+        EXPORT_JOBS[job_id] = job
+        _prune_export_jobs()
+    threading.Thread(target=_run_html_export, args=(job_id, username, contact, days),
+                     daemon=True).start()
+    return jsonify({'id': job_id})
+
+
+@app.route('/api/export/progress')
+def api_export_progress():
+    job = EXPORT_JOBS.get(request.args.get('id', ''))
+    if job is None:
+        abort(404, '任务不存在')
+    return jsonify({k: job.get(k) for k in ('status', 'error', 'name', 'filename')})
+
+
+@app.route('/api/export/download')
+def api_export_download():
+    job = EXPORT_JOBS.get(request.args.get('id', ''))
+    if job is None or job.get('status') != 'done' or not os.path.isfile(job.get('zip', '')):
+        abort(404, '文件不存在或任务未完成')
+    return send_file(job['zip'], as_attachment=True, download_name=job['filename'],
+                     mimetype='application/zip')
+
+
 @app.route('/api/export')
 def api_export():
+    """CSV / TXT / JSON 同步导出（HTML 请走 /api/export/start 后台任务）"""
     username = request.args.get('u', '')
     fmt = (request.args.get('fmt') or 'csv').lower()
     time_range = _time_range(request.args.get('days', 30))
 
-    with DB_LOCK:
-        try:
-            contact = database.get_contact_by_username(username)
-        except Exception:
-            contact = None
-    name = (contact.remark or contact.nickname or username) if contact is not None else username
+    with DB_POOL.checkout() as database:
+        names = _contact_names(database)
+    name = _name_of(names, username)
     safe_name = ''.join(c for c in name if c not in '\\/:*?"<>|') or username
 
     if fmt in ('csv', 'txt', 'json'):
@@ -637,39 +678,15 @@ def api_export():
             return send_file(data, as_attachment=True, download_name=f'{safe_name}_{stamp}.json',
                              mimetype='application/json')
 
-    if fmt == 'html':
-        # 完整 HTML（含图片/语音/视频媒体），打包 zip 下载
-        days_tag = f'{request.args.get("days", 30)}天'
-        work = os.path.join(EXPORT_DIR, f'{safe_name}_{days_tag}')  # 固定目录，覆盖复用
-        exporter = HtmlExporter(database, contact, output_dir=work,
-                                type_=FileType.HTML, time_range=time_range)
-        exporter.start()
-        html_root = os.path.join(work, '聊天记录')
-        html_dirs = [os.path.join(html_root, d) for d in os.listdir(html_root)] \
-            if os.path.isdir(html_root) else []
-        if not html_dirs:
-            abort(500, 'HTML 导出失败')
-        src_dir = html_dirs[0]
-        zpath = os.path.join(EXPORT_DIR, f'{safe_name}_{days_tag}.zip')
-        if os.path.exists(zpath):
-            os.remove(zpath)
-        with zipfile.ZipFile(zpath, 'w', zipfile.ZIP_DEFLATED) as zf:
-            for root, _, files in os.walk(src_dir):
-                for fn in files:
-                    fp = os.path.join(root, fn)
-                    zf.write(fp, os.path.relpath(fp, src_dir))
-        return send_file(zpath, as_attachment=True, download_name=os.path.basename(zpath),
-                         mimetype='application/zip')
-
-    abort(400, f'不支持的导出格式: {fmt}')
+    abort(400, f'不支持的导出格式: {fmt}（HTML 请使用 /api/export/start）')
 
 
 if __name__ == '__main__':
     from multiprocessing import freeze_support
     freeze_support()
-    import webbrowser
     init_database()
     threading.Thread(target=_auto_sync_loop, daemon=True).start()
     print('[i] 留痕 WebUI 启动: http://127.0.0.1:5000')
+    import webbrowser
     threading.Timer(1.5, webbrowser.open, args=['http://127.0.0.1:5000']).start()
     app.run(host='127.0.0.1', port=5000, threaded=True, use_reloader=False)

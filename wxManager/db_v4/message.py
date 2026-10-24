@@ -160,12 +160,18 @@ order by sort_seq
         else:
             return []
 
+    def _get_message_by_server_id(self, cursor, table_name, sql, server_id):
+        if not self.table_exists(cursor, table_name):
+            return None
+        cursor.execute(sql, [server_id])
+        return cursor.fetchone()
+
     def get_message_by_server_id(self, username, server_id):
         """
-        获取小于start_sort_seq的msg_num个消息
+        按 server_id 取单条消息；并行查各分片（媒体路由高频调用，串行扇出是瓶颈）
         @param username:
         @param server_id:
-        @return: messages, 最后一条消息的start_sort_seq
+        @return:
         """
         table_name = f'Msg_{hashlib.md5(username.encode("utf-8")).hexdigest()}'
         sql = f'''
@@ -174,14 +180,18 @@ from {table_name} as msg
 join Name2Id on msg.real_sender_id = Name2Id.rowid
 where server_id = ?
 '''
-        for db in self.DB:
-            cursor = db.cursor()
-            if not self.table_exists(cursor, table_name):
-                continue
-            cursor.execute(sql, [server_id])
-            result = cursor.fetchone()
-            if result:
-                return result
+        if not self.DB:
+            return None
+        with ThreadPoolExecutor(max_workers=len(self.DB)) as executor:
+            futures = [
+                executor.submit(self._get_message_by_server_id, db.cursor(), table_name, sql, server_id)
+                for db in self.DB
+            ]
+            for future in futures:  # server_id 全局唯一，任一命中即可
+                result = future.result()
+                if result:
+                    return result
+        return None
 
     def get_messages_by_num(self, username, start_sort_seq, msg_num=20):
         results = []

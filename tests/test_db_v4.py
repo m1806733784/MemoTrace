@@ -74,6 +74,17 @@ class TestContactDB(unittest.TestCase):
         self.assertEqual(self.db.get_labels('10,10'), '朋友,朋友')
         self.assertEqual(self.db.get_labels(''), '')
 
+    def test_get_contact_name_map(self):
+        conn = sqlite3.connect(os.path.join(self.tmp.name, 'contact', 'contact.db'))
+        conn.execute("insert into contact values ('wxid_c', '', 1, 0, '', '无备注昵称C', "
+                     "'', '', '', '', x'', '', 0, 0, '', 0, '', '')")
+        conn.commit()
+        conn.close()
+        name_map = self.db.get_contact_name_map()
+        self.assertEqual(name_map['wxid_a'], ('备注A', '昵称A'))
+        self.assertEqual(name_map['wxid_c'], ('', '无备注昵称C'))  # 无备注时前端回退昵称
+        self.assertEqual(len(name_map), 3)  # 不过滤 local_type，含被过滤的 wxid_b
+
 
 class TestSessionDB(unittest.TestCase):
     def setUp(self):

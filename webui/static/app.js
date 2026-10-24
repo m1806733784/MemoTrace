@@ -479,9 +479,11 @@ $('#daysGroup').onclick = (e) => {
 $('#btnDoExport').onclick = async () => {
   if (!currentSession) { toast('请先选择一个会话'); return; }
   const btn = $('#btnDoExport');
-  btn.disabled = true; btn.textContent = '导出中，请稍候（大会话可能需要几分钟）...';
-  const url = `/api/export?u=${encodeURIComponent(currentSession.username)}&fmt=${exportFmt}&days=${exportDays}`;
+  const u = encodeURIComponent(currentSession.username);
   try {
+    if (exportFmt === 'html') { await exportHtml(btn, u); return; }
+    btn.disabled = true; btn.textContent = '导出中，请稍候...';
+    const url = `/api/export?u=${u}&fmt=${exportFmt}&days=${exportDays}`;
     const res = await fetch(url);
     if (!res.ok) {
       const msg = await res.text();
@@ -505,6 +507,39 @@ $('#btnDoExport').onclick = async () => {
     btn.disabled = false; btn.textContent = '开始导出';
   }
 };
+
+/* HTML 导出：后台任务 + 轮询进度（大会话耗时长，不能占用请求线程） */
+async function exportHtml(btn, u) {
+  btn.disabled = true;
+  let dot = 0;
+  const timer = setInterval(() => {
+    btn.textContent = '导出中' + '.'.repeat(++dot % 4);
+  }, 600);
+  try {
+    const r = await fetch(`/api/export/start?u=${u}&days=${exportDays}`);
+    if (!r.ok) { toast('导出失败: ' + (await r.text()).slice(0, 120), 5000); return; }
+    const { id } = await r.json();
+    while (true) {
+      await new Promise(res => setTimeout(res, 1500));
+      const p = await (await fetch(`/api/export/progress?id=${id}`)).json();
+      if (p.status === 'done') {
+        window.location = `/api/export/download?id=${id}`;
+        toast('导出完成: ' + (p.filename || 'HTML zip'));
+        $('#exportPanel').classList.add('hidden');
+        return;
+      }
+      if (p.status === 'error') {
+        toast('导出失败: ' + (p.error || '').slice(0, 120), 5000);
+        return;
+      }
+    }
+  } catch (err) {
+    toast('导出失败: ' + err.message, 5000);
+  } finally {
+    clearInterval(timer);
+    btn.disabled = false; btn.textContent = '开始导出';
+  }
+}
 
 /* ═══════════ 同步控件绑定 ═══════════ */
 $('#btnSync').onclick = manualSync;

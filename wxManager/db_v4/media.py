@@ -13,6 +13,7 @@ import shutil
 import subprocess
 import sys
 import traceback
+from concurrent.futures import ThreadPoolExecutor
 
 from wxManager.merge import increase_update_data, increase_data
 from wxManager.model import DataBaseBase
@@ -38,12 +39,20 @@ class MediaDB(DataBaseBase):
         '''
         if not self.DB:
             return b''
-        for db in self.DB:
+        # 并行查各分片（语音路由逐条调用，串行扇出是瓶颈）
+        def _query(db):
             cursor = db.cursor()
-            cursor.execute(sql, [server_id])
-            result = cursor.fetchone()
-            if result:
-                return result[0]
+            try:
+                cursor.execute(sql, [server_id])
+                row = cursor.fetchone()
+                return row[0] if row else b''
+            finally:
+                cursor.close()
+
+        with ThreadPoolExecutor(max_workers=len(self.DB)) as executor:
+            for buf in executor.map(_query, self.DB):
+                if buf:
+                    return buf
         return b''
 
     def get_audio_path(self, server_id, output_dir, filename=''):
