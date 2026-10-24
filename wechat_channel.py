@@ -10,7 +10,6 @@
   python wechat_channel.py send <联系人名> <消息>
   python wechat_channel.py ask <联系人名> <问题> [--timeout 300]   # 发送并等回复
 """
-import json
 import os
 import sqlite3
 import sys
@@ -24,14 +23,13 @@ FILE_HELPER_NAMES = ('文件传输助手', 'filehelper')
 
 
 def _wx_account():
-    """返回 (wxid, wx_dir)：以 key.json 为准"""
+    """返回 (wxid, wx_dir)：以 key.json 为准（DPAPI 加密，见 secure_store）"""
+    from secure_store import load_key_file
     for account in find_accounts(OUT_ROOT):
         if os.path.isfile(account['key_file']):
-            try:
-                with open(account['key_file'], encoding='utf-8') as f:
-                    return account['wxid'], json.load(f).get('wx_dir', '')
-            except (OSError, ValueError):
-                continue
+            data = load_key_file(account['key_file'])
+            if data:
+                return account['wxid'], data.get('wx_dir', '')
     return None, None
 
 
@@ -54,9 +52,21 @@ def resolve_contact(name: str) -> str:
         return name
 
 
+# 微信 4.x 主窗口 Qt 类名（随 Qt 版本变化，逐个尝试；升级适配时往这里加）
+WECHAT_WINDOW_CLASSES = ('Qt51514QWindowIcon', 'Qt51514QWindowToolSaveBits', 'Qt6QWindowIcon')
+
+
+def _find_wechat_window(per_class_timeout=1):
+    for class_name in WECHAT_WINDOW_CLASSES:
+        win = auto.WindowControl(searchDepth=1, ClassName=class_name, Name='微信')
+        if win.Exists(per_class_timeout):
+            return win
+    return None
+
+
 def _send_keys_robust(contact, message):
-    win = auto.WindowControl(searchDepth=1, ClassName='Qt51514QWindowIcon', Name='微信')
-    if not win.Exists(3):
+    win = _find_wechat_window()
+    if win is None:
         print('[!] 未找到微信窗口（微信需在本机运行）')
         return
     win.SetActive()
