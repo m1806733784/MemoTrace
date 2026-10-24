@@ -185,5 +185,32 @@ class TestChangeDetection(unittest.TestCase):
         self.assertFalse(stable_copy(os.path.join(self.tmp.name, 'nope'), dst))
 
 
+class TestFileLock(unittest.TestCase):
+    def test_lock_is_exclusive_and_reusable(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, 'sub', '.sync.lock')  # 锁文件目录自动创建
+            with sync_engine._file_lock(path):
+                with self.assertRaises(sync_engine._LockBusy):
+                    with sync_engine._file_lock(path):
+                        pass
+            # 释放后可再次获取
+            with sync_engine._file_lock(path):
+                pass
+
+    def test_sync_reports_busy_when_locked(self):
+        """已持锁时 sync_databases 返回忙而非覆盖状态"""
+        with tempfile.TemporaryDirectory() as d:
+            src = os.path.join(d, 'wx', 'db_storage')
+            os.makedirs(os.path.join(src, 'message'))
+            with open(os.path.join(src, 'message', 'message_0.db'), 'wb') as f:
+                f.write(b'\x01' * 64)
+            out_root = os.path.join(d, 'out')
+            os.makedirs(os.path.join(out_root, 'wxid_x'))
+            with sync_engine._file_lock(os.path.join(out_root, 'wxid_x', '.sync.lock')):
+                r = sync_engine.sync_databases(os.path.join(d, 'wx'), out_root, 'wxid_x')
+            self.assertEqual(r['changed'], [])
+            self.assertIn('另一个进程', r['error'])
+
+
 if __name__ == '__main__':
     unittest.main()

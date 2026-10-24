@@ -15,6 +15,7 @@ import sqlite3
 import struct
 import tempfile
 import time
+from contextlib import contextmanager
 
 from Crypto.Cipher import AES
 from Crypto.Hash import SHA512
@@ -25,25 +26,48 @@ SALT_SIZE = 16
 RESERVE = 80  # IV(16) + HMAC-SHA512(64)
 
 
+class _LockBusy(RuntimeError):
+    pass
+
+
+@contextmanager
+def _file_lock(path: str):
+    """跨进程文件锁（Windows msvcrt 字节锁）；拿不到时抛 _LockBusy"""
+    import msvcrt
+    os.makedirs(os.path.dirname(path) or '.', exist_ok=True)
+    f = open(path, 'a+b')
+    try:
+        f.seek(0)
+        try:
+            msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
+        except OSError:
+            raise _LockBusy(path)
+        try:
+            yield
+        finally:
+            try:
+                f.seek(0)
+                msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK, 1)
+            except OSError:
+                pass
+    finally:
+        f.close()
+
+
 # ---------------------------------------------------------------- 密钥
 def get_key(wxid: str, out_root: str) -> str:
-    """读持久化密钥；没有则现场提取（需微信已登录）"""
+    """读持久化密钥（DPAPI 加密，见 secure_store）；没有则现场提取（需微信已登录）"""
+    from secure_store import load_key_file, save_key_file
     key_file = os.path.join(out_root, wxid, 'key.json')
-    if os.path.isfile(key_file):
-        try:
-            with open(key_file, encoding='utf-8') as f:
-                k = json.load(f).get('key', '')
-            if k:
-                return k
-        except Exception:
-            pass
+    data = load_key_file(key_file)
+    if data and data.get('key'):
+        return data['key']
     from wxManager.decrypt import get_info_v4
     target = next((i for i in get_info_v4() if i.key), None)
     if target is None:
         raise RuntimeError('未提取到微信密钥（微信需已登录）')
     os.makedirs(os.path.dirname(key_file), exist_ok=True)
-    with open(key_file, 'w', encoding='utf-8') as f:
-        json.dump({'key': target.key, 'wx_dir': target.wx_dir, 'time': time.time()}, f)
+    save_key_file(key_file, target.key, target.wx_dir)
     return target.key
 
 
@@ -203,9 +227,12 @@ def load_sync_state(out_root: str, wxid: str) -> dict:
 
 
 def save_sync_state(out_root: str, wxid: str, state: dict):
+    """原子写（临时文件 + 替换），避免并发写坏状态文件"""
     p = os.path.join(out_root, wxid, 'sync_state.json')
-    with open(p, 'w', encoding='utf-8') as f:
+    tmp = p + '.tmp'
+    with open(tmp, 'w', encoding='utf-8') as f:
         json.dump({'files': state, 'time': time.time()}, f, ensure_ascii=False)
+    os.replace(tmp, p)
 
 
 def find_changed(src_root: str, known: dict):
@@ -256,15 +283,27 @@ def sync_databases(wx_dir: str, out_root: str, wxid: str, progress=None) -> dict
     if not os.path.isdir(src_root):
         result['error'] = f'微信数据目录不存在: {src_root}'
         return result
+    # 跨进程互斥：WebUI 自动/手动同步、channel 刷新可能并发，防止文件替换竞态
+    try:
+        with _file_lock(os.path.join(out_root, wxid, '.sync.lock')):
+            _sync_under_lock(src_root, dst_root, out_root, wxid, result, progress)
+    except _LockBusy:
+        result['error'] = '另一个进程正在同步，本次跳过'
+    return result
+
+
+def _sync_under_lock(src_root: str, dst_root: str, out_root: str, wxid: str,
+                     result: dict, progress):
     known = load_sync_state(out_root, wxid)
     todo = find_changed(src_root, known)
     if not todo:
-        return result
+        return
     try:
         key = get_key(wxid, out_root)
     except RuntimeError as e:
         result['error'] = str(e)
-        return result
+        return
+    os.makedirs(dst_root, exist_ok=True)
     # 临时目录放在目标盘（os.replace 跨盘会 WinError 17）
     try:
         tmp = tempfile.mkdtemp(prefix='.memotrace_sync_', dir=dst_root)

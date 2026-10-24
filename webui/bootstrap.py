@@ -66,12 +66,11 @@ def ensure_decrypted(out_root=OUT_ROOT, verbose=False) -> str:
     dest = os.path.join(out_root, target.wxid)
     db_dir = os.path.join(dest, 'db_storage')
     os.makedirs(db_dir, exist_ok=True)
-    # 密钥持久化（增量同步复用，避免每次扫内存）
+    # 密钥持久化（增量同步复用，避免每次扫内存）；DPAPI 加密存储
     try:
-        with open(os.path.join(dest, 'key.json'), 'w', encoding='utf-8') as f:
-            json.dump({'key': target.key, 'wx_dir': target.wx_dir, 'time': time.time()},
-                      f, ensure_ascii=False)
-    except OSError:
+        from secure_store import save_key_file
+        save_key_file(os.path.join(dest, 'key.json'), target.key, target.wx_dir)
+    except Exception:
         pass
 
     me = Me()
