@@ -13,7 +13,7 @@ from .db_main import DataBaseInterface
 from .manager_v4 import DataBaseV4
 from .manager_v3 import DataBaseV3
 
-__version__ = '3.0.0'
+__version__ = '3.1.0'
 
 
 class DatabaseConnection:
