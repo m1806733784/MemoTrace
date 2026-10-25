@@ -458,24 +458,53 @@ $('#calNext').onclick = () => { calMonth++; if (calMonth > 11) { calMonth = 0; c
 
 /* ═══════════ 导出 ═══════════ */
 let exportFmt = 'csv', exportDays = 30;
+const expStart = $('#expStart'), expEnd = $('#expEnd'), expDateClear = $('#expDateClear');
+
 $('#btnExport').onclick = (e) => { e.stopPropagation(); $('#exportPanel').classList.toggle('hidden'); };
 document.addEventListener('click', (e) => {
   if (!e.target.closest('.export-wrap')) $('#exportPanel').classList.add('hidden');
 });
+
+function exportRangeParams() {
+  // 自定义时段优先：起止都填了才生效
+  if (expStart.value && expEnd.value) return `&start=${expStart.value}&end=${expEnd.value}`;
+  return `&days=${exportDays}`;
+}
+function exportRangeText() {
+  if (expStart.value && expEnd.value) {
+    const [a, b] = expStart.value <= expEnd.value
+      ? [expStart.value, expEnd.value] : [expEnd.value, expStart.value];
+    return `自定义 ${a} ~ ${b}（含端日）`;
+  }
+  return exportDays > 0 ? `最近 ${exportDays} 天` : '全部记录';
+}
+function refreshExpTip() {
+  $('#expTip').textContent = (exportFmt === 'html'
+    ? 'HTML 含图片/语音/视频，打包 zip 下载；' : `导出为 ${exportFmt.toUpperCase()} 纯文本；`)
+    + exportRangeText();
+  $('#dateRange').classList.toggle('set', !!(expStart.value && expEnd.value));
+  expDateClear.classList.toggle('hidden', !expStart.value && !expEnd.value);
+}
+
 $('#fmtGroup').onclick = (e) => {
   if (e.target.dataset.fmt) {
     exportFmt = e.target.dataset.fmt;
     [...$('#fmtGroup').children].forEach(b => b.classList.toggle('active', b === e.target));
-    $('#expTip').textContent = exportFmt === 'html'
-      ? 'HTML 含图片/语音/视频，打包 zip 下载' : `导出为 ${exportFmt.toUpperCase()} 纯文本格式`;
+    refreshExpTip();
   }
 };
 $('#daysGroup').onclick = (e) => {
   if (e.target.dataset.days != null) {
     exportDays = +e.target.dataset.days;
     [...$('#daysGroup').children].forEach(b => b.classList.toggle('active', b === e.target));
+    expStart.value = expEnd.value = '';  // 选预设时清除自定义时段
+    refreshExpTip();
   }
 };
+expStart.onchange = refreshExpTip;
+expEnd.onchange = refreshExpTip;
+expDateClear.onclick = () => { expStart.value = expEnd.value = ''; refreshExpTip(); };
+
 $('#btnDoExport').onclick = async () => {
   if (!currentSession) { toast('请先选择一个会话'); return; }
   const btn = $('#btnDoExport');
@@ -483,7 +512,7 @@ $('#btnDoExport').onclick = async () => {
   try {
     if (exportFmt === 'html') { await exportHtml(btn, u); return; }
     btn.disabled = true; btn.textContent = '导出中，请稍候...';
-    const url = `/api/export?u=${u}&fmt=${exportFmt}&days=${exportDays}`;
+    const url = `/api/export?u=${u}&fmt=${exportFmt}${exportRangeParams()}`;
     const res = await fetch(url);
     if (!res.ok) {
       const msg = await res.text();
@@ -516,7 +545,7 @@ async function exportHtml(btn, u) {
     btn.textContent = '导出中' + '.'.repeat(++dot % 4);
   }, 600);
   try {
-    const r = await fetch(`/api/export/start?u=${u}&days=${exportDays}`);
+    const r = await fetch(`/api/export/start?u=${u}${exportRangeParams()}`);
     if (!r.ok) { toast('导出失败: ' + (await r.text()).slice(0, 120), 5000); return; }
     const { id } = await r.json();
     while (true) {

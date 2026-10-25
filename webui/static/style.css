@@ -176,7 +176,7 @@ button { font-family: inherit; }
 
 .export-wrap { position: relative; }
 .export-panel {
-  position: absolute; right: 0; top: 42px; width: 292px; background: #fff;
+  position: absolute; right: 0; top: 42px; width: 328px; background: #fff;
   border-radius: 12px; box-shadow: var(--shadow-pop); padding: 16px;
   z-index: 60; animation: pop .16s ease-out;
 }
@@ -191,6 +191,21 @@ button { font-family: inherit; }
 }
 .fmt-group button:hover { border-color: var(--brand); }
 .fmt-group button.active { background: var(--brand); border-color: var(--brand); color: #fff; }
+.date-range { display: flex; align-items: center; gap: 5px; flex: 1; min-width: 0; }
+.date-range input[type="date"] {
+  flex: 1; min-width: 0; border: 1px solid #dcdcdc; border-radius: 6px;
+  padding: 4px 6px; font-size: 12px; color: var(--text-2); background: #fff;
+  font-family: inherit;
+}
+.date-range input[type="date"]:focus { outline: none; border-color: var(--brand); }
+.date-range span { color: var(--text-3); flex-shrink: 0; }
+.date-range.set input[type="date"] { border-color: var(--brand); color: var(--text-1); }
+.date-clear {
+  border: none; background: #f2f2f2; color: var(--text-3); width: 20px; height: 20px;
+  border-radius: 50%; cursor: pointer; font-size: 11px; line-height: 1;
+  flex-shrink: 0; padding: 0;
+}
+.date-clear:hover { background: #e2e2e2; color: var(--text-1); }
 .exp-tip { color: var(--text-3); font-size: 12px; margin-bottom: 12px; }
 .btn-primary {
   border: none; background: var(--brand); color: #fff;

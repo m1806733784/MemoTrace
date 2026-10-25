@@ -538,11 +538,42 @@ def media_file(sid):
 
 
 # ---------------------------------------------------------------- 导出
-def _time_range(days):
-    if not days or int(days) <= 0:
+def _time_range(args):
+    """导出时间范围：自定义 start/end（YYYY-MM-DD，含端日）优先，否则按 days 天数。
+    返回 (start, end) 日期二元组（end 为次日零点，与 days 语义一致），None 表示全部。"""
+    start_s, end_s = args.get('start', ''), args.get('end', '')
+    if start_s and end_s:
+        try:
+            d1 = datetime.strptime(start_s, '%Y-%m-%d').date()
+            d2 = datetime.strptime(end_s, '%Y-%m-%d').date()
+            if d1 > d2:
+                d1, d2 = d2, d1
+            return (d1, d2 + timedelta(days=1))
+        except ValueError:
+            pass  # 日期非法则回落到天数模式
+    days = args.get('days', 30)
+    try:
+        days = int(days)
+    except (TypeError, ValueError):
+        days = 30
+    if days <= 0:
         return None
     end = date.today() + timedelta(days=1)
-    return (end - timedelta(days=int(days)), end)
+    return (end - timedelta(days=days), end)
+
+
+def _range_tag(args) -> str:
+    """导出产物命名用的范围标签"""
+    start_s, end_s = args.get('start', ''), args.get('end', '')
+    if start_s and end_s:
+        if end_s < start_s:
+            start_s, end_s = end_s, start_s
+        return f'{start_s}_{end_s}'
+    try:
+        days = int(args.get('days', 30))
+    except (TypeError, ValueError):
+        days = 30
+    return f'{days}天' if days > 0 else '全部'
 
 
 def _messages_rows(username, time_range):
@@ -570,16 +601,14 @@ def _prune_export_jobs(keep=20):
         EXPORT_JOBS.pop(next(iter(EXPORT_JOBS)))
 
 
-def _run_html_export(job_id, username, contact, days):
+def _run_html_export(job_id, username, contact, time_range, range_tag):
     """后台线程：完整 HTML 导出（含媒体）并打包 zip。用独立数据库实例，不占请求池。"""
     job = EXPORT_JOBS[job_id]
     database = None
     try:
-        time_range = _time_range(days)
         name = contact.remark or contact.nickname or username
         safe_name = ''.join(c for c in name if c not in '\\/:*?"<>|') or username
-        days_tag = f'{days}天'
-        work = os.path.join(EXPORT_DIR, f'{safe_name}_{days_tag}')  # 固定目录，覆盖复用
+        work = os.path.join(EXPORT_DIR, f'{safe_name}_{range_tag}')  # 固定目录，覆盖复用
         database = bootstrap.open_database(DB_DIR)
         exporter = HtmlExporter(database, contact, output_dir=work,
                                 type_=FileType.HTML, time_range=time_range)
@@ -590,7 +619,7 @@ def _run_html_export(job_id, username, contact, days):
         if not html_dirs:
             raise RuntimeError('HTML 导出未产生结果')
         src_dir = html_dirs[0]
-        zpath = os.path.join(EXPORT_DIR, f'{safe_name}_{days_tag}.zip')
+        zpath = os.path.join(EXPORT_DIR, f'{safe_name}_{range_tag}.zip')
         if os.path.exists(zpath):
             os.remove(zpath)
         with zipfile.ZipFile(zpath, 'w', zipfile.ZIP_DEFLATED) as zf:
@@ -611,12 +640,11 @@ def _run_html_export(job_id, username, contact, days):
 
 @app.route('/api/export/start')
 def api_export_start():
-    """启动 HTML 后台导出，返回任务 id（前端轮询 progress，完成后 download）"""
+    """启动 HTML 后台导出，返回任务 id（前端轮询 progress，完成后 download）。
+    时间范围：start/end（YYYY-MM-DD）自定义，或 days 预设"""
     username = request.args.get('u', '')
-    try:
-        days = int(request.args.get('days', 30))
-    except ValueError:
-        days = 30
+    time_range = _time_range(request.args)
+    range_tag = _range_tag(request.args)
     with DB_POOL.checkout() as database:
         contact = database.get_contact_by_username(username)
         if contact is None:
@@ -626,7 +654,7 @@ def api_export_start():
     with _EXPORT_LOCK:
         EXPORT_JOBS[job_id] = job
         _prune_export_jobs()
-    threading.Thread(target=_run_html_export, args=(job_id, username, contact, days),
+    threading.Thread(target=_run_html_export, args=(job_id, username, contact, time_range, range_tag),
                      daemon=True).start()
     return jsonify({'id': job_id})
 
@@ -650,10 +678,11 @@ def api_export_download():
 
 @app.route('/api/export')
 def api_export():
-    """CSV / TXT / JSON 同步导出（HTML 请走 /api/export/start 后台任务）"""
+    """CSV / TXT / JSON 同步导出（HTML 请走 /api/export/start 后台任务）。
+    时间范围：start/end（YYYY-MM-DD）自定义，或 days 预设"""
     username = request.args.get('u', '')
     fmt = (request.args.get('fmt') or 'csv').lower()
-    time_range = _time_range(request.args.get('days', 30))
+    time_range = _time_range(request.args)
 
     with DB_POOL.checkout() as database:
         names = _contact_names(database)

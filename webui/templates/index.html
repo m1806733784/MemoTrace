@@ -87,6 +87,15 @@
                 <button data-days="0">全部</button>
               </div>
             </div>
+            <div class="exp-row">
+              <label>时段</label>
+              <div class="date-range" id="dateRange">
+                <input type="date" id="expStart" title="开始日期（含当天）">
+                <span>~</span>
+                <input type="date" id="expEnd" title="结束日期（含当天）">
+                <button class="date-clear hidden" id="expDateClear" title="清除自定义时段">✕</button>
+              </div>
+            </div>
             <div class="exp-tip" id="expTip">HTML 含图片/语音/视频，打包 zip 下载</div>
             <button class="btn-primary btn-block" id="btnDoExport">开始导出</button>
           </div>
