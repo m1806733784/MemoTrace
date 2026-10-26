@@ -69,7 +69,7 @@
 [![](https://img.shields.io/badge/GitHub-black.svg)](https://github.com/LC044/WeChatMsg)
 [![](https://img.shields.io/badge/Gitee-red.svg)](https://gitee.com/lc044/WeChatMsg)
 [![](https://img.shields.io/badge/Download-yellow.svg)](https://memotrace.cn/)
-- 🔒️🔑🔓️Windows本地微信数据库（支持微信4.0）
+- 🔒️🔑🔓️Windows本地微信数据库（支持微信4.0/4.1）
 - 还原微信聊天界面
     - 🗨文本✅
     - 🏝图片✅
@@ -87,56 +87,51 @@
   - CSV文档✅ 
   - TXT文档✅ 
   - Word文档✅
-- 分析聊天数据，做成[可视化年报](https://memotrace.cn/demo.html)
-
-## 2024年度报告
-
-### 预览
-
-[个人年度报告在线预览](https://memotrace.cn/2024/single/)
-
-[双人年度报告在线预览](https://memotrace.cn/2024Report/)
-
-手机可以扫码观看
-
-<img src="/doc/images/qrcode0.png" height="300px"/>
-
-![](/doc/images/demo1.gif)
-
-### 源码地址
-
-[https://github.com/LC044/AnnualReport](https://github.com/LC044/AnnualReport)
-
-# ⌛使用
-
-下载地址：[https://memotrace.cn/](https://memotrace.cn/)
-
-下载打包好的exe可执行文件，双击即可运行
-
-**⚠️注意：若出现闪退情况请右击选择用管理员身份运行exe程序，该程序不存在任何病毒，若杀毒软件提示有风险选择略过即可，key为none可重启电脑**
 
 ## 源码运行
 
-[使用示例](./example/README.md)
-[详见开发者手册](./doc/开发者手册.md)
+环境要求：Windows 10/11，微信 4.x 已登录，Python 3.10+
 
-[AI聊天（大模型微调指南）](./doc/MemoAI/readme.md)
+**1. 安装依赖**
 
-## PC端使用过程中部分问题解决（可参考）
+```bash
+pip install -r requirements.txt          # 核心依赖（解密/导出）
+pip install -r requirements-web.txt      # WebUI 依赖（flask、uiautomation）
+```
 
-#### 🤔如果您在pc端使用的时候出现问题，可以先参考以下方面，如果仍未解决，可以在群里交流~
+**2. 数据输出目录（可选）**
 
-* 不支持Win7
-* 不支持Mac(未来或许会实现)
-* 遇到问题四大法宝
-  * 首先要删除app/Database/Msg文件夹
-  * 重启微信
-  * 重启exe程序
-  * 重启电脑
-  * 换电脑
-如果您在运行可执行程序的时候出现闪退的现象，请右击软件使用管理员权限运行。
+默认输出到 `~/Documents/MemoTrace`，可通过以下任一方式指定：
 
-[查看详细教程](https://memotrace.cn/doc/)
+* 环境变量 `MEMOTRACE_DATA_DIR`
+* 仓库根目录 `config_local.json`：`{"data_root": "D:\\Files\\WeChatFiles\\MemoTrace_数据"}`
+
+**3. 启动 WebUI（推荐）**
+
+```bash
+python webui/app.py
+```
+
+浏览器打开 `http://127.0.0.1:5000`，功能：
+
+* 仿微信界面浏览聊天记录：文本/图片/语音/视频/文件/表情包/引用消息，点击日期的日历视图
+* 增量同步：检测微信登录状态，手动或自动（默认间隔 60 秒）把新消息解密入库
+* 导出：CSV / TXT / JSON 同步下载；HTML（含图片/语音/视频媒体，打包 zip）后台任务下载，支持自定义起止日期
+
+**4. 一键命令行流程**
+
+```bash
+python run_memotrace.py
+```
+
+提取密钥（支持微信 4.1）→ 解密当前账号全部数据库 → 导出最近 30 天会话 HTML；可重复运行，已有解密数据自动跳过。
+
+**5. 更多**
+
+* [使用示例](./example/README.md)
+* [开发者手册](./doc/开发者手册.md)
+* [AI聊天（大模型微调指南）](./doc/MemoAI/readme.md)
+* 单元测试：`python -m pytest tests/`
 
 # 🏆致谢
 
@@ -159,21 +154,6 @@
 
 [![Star History Chart](https://api.star-history.com/svg?repos=LC044/WeChatMsg&type=Date)](https://star-history.com/?utm_source=bestxtools.com#LC044/WeChatMsg&Date)
 
-# 🤝贡献者
-
-<a href="https://github.com/lc044/wechatmsg/graphs/contributors">
-  <img src="https://contrib.rocks/image?repo=lc044/wechatmsg" />
-</a>
-
-## 赞助者名单
-
-感谢以下赞助者的慷慨支持：
-
-- [STDquantum](https://github.com/STDquantum)
-- [xuanli](https://github.com/xuanli)
-- [无名路人](https://github.com/wumingluren)
-- [时鹏亮](https://shipengliang.com)
-
 # 🎄温馨提示
 
 如果您在使用该软件的过程中
@@ -185,31 +165,6 @@
 * 等其他给您造成困扰的地方
 
 请提起[issue](https://github.com/LC044/WeChatMsg/issues)，我将尽快为您解决问题
-
-如果您是一名开发者，有新的想法或建议，欢迎[fork](https://github.com/LC044/WeChatMsg/forks)
-该项目并发起[PR](https://github.com/LC044/WeChatMsg/pulls)，我将把您的名字写入贡献者名单中
-
-# 联系方式
-
-如果您遇到了问题，可以添加QQ群寻求帮助，由于精力有限，不能回答所有问题，所以还请您仔细阅读文档之后再考虑是否入群
-
-## 加群方式
-
-1. 关注官方公众号，回复：联系方式
-2. QQ扫码入群
-
-后续更新将会在公众号同步发布
-<div>
-  <img src="https://blog.lc044.love/static/img/b8df8c594a4cabaa0a62025767a3cfd9.weixin.webp">
-</div>
-
-## AI交流
-
-欢迎对“前言”中AI感兴趣的加入QQ群（不负责任何答疑），让我们一起探讨新技术，钻研新方案，将科技的力量融入生活，打造出一个真正具有情感的个人AI
-
-<div>
-  <img src="doc/images/ai_qq.jpg" height="200">
-</div>
 
 # License
 
